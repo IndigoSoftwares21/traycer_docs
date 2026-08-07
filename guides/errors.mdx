@@ -1,0 +1,272 @@
+---
+title: "Responses and errors"
+description: "One envelope for everything, every status code the API returns, and how to handle each."
+icon: "triangle-exclamation"
+---
+
+Every response — success or failure — uses the same JSON envelope. There is one shape to parse and one place to look for what went wrong.
+
+## The envelope
+
+```json Success
+{
+  "message": "Wallets retrieved successfully",
+  "code": 200,
+  "data": { }
+}
+```
+
+| Field | Always present | Notes |
+| --- | --- | --- |
+| `message` | yes | Human-readable. Written for developers, not end users — do not surface it verbatim. |
+| `code` | yes | Mirrors the HTTP status. |
+| `data` | on success | The payload. **`null`, not omitted**, when an endpoint has nothing to return. |
+
+Errors use the same envelope without `data`:
+
+```json Error
+{
+  "message": "Insufficient permissions. API Key has read-only access.",
+  "code": 403
+}
+```
+
+Validation failures add `validationErrors`:
+
+```json Validation error
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["amount"], "message": "Amount must be a positive number" },
+    { "path": ["toAddress"], "message": "Recipient address is not a valid address for this network" }
+  ]
+}
+```
+
+Each entry has a `path` locating the field in your request and a `message` describing the problem. Several fields can fail at once, so iterate rather than reading `[0]`.
+
+<Note>
+  Dates are always ISO 8601 strings in UTC (`2026-08-07T14:22:31.000Z`). Large integers — block numbers, counts — are serialized as strings when they exceed the safe range, so parse numerically rather than assuming a JSON number.
+</Note>
+
+## Status codes
+
+| Code | Meaning | What to do |
+| --- | --- | --- |
+| `200` | Success. | — |
+| `201` | Created — also returned by `POST /transfers/quote`, which creates nothing. | — |
+| `400` | Invalid request. Check `validationErrors` when present. | Fix the request. Do not retry unchanged. |
+| `401` | Missing, malformed, unknown, or expired API key. | Fix credentials. Do not retry. |
+| `403` | Key lacks the required scope, or the IP is not allowlisted. | Use a `read_write` key, or allowlist the address. |
+| `404` | Resource does not exist. Rare — see below. | Do not retry. |
+| `409` | An `Idempotency-Key` request is still in flight. | Wait, retry with the **same** key. |
+| `422` | `Idempotency-Key` reused with a different payload. | A bug in key generation. Do not retry. |
+| `429` | Rate limited. | Back off, honour `retry-after`. |
+| `500` | Server-side failure, including unreachable blockchain nodes. | Retry with backoff — and read the warning below. |
+| `504` | A database query timed out. | Retry with backoff. |
+
+### Why missing resources return 400, not 404
+
+Existence is checked during request validation, before an endpoint's logic runs. A wallet reference that does not exist is therefore a *validation failure* on that field, not a missing route:
+
+```json
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["walletReference"], "message": "Wallet not found or not owned by organization" }
+  ]
+}
+```
+
+The same applies to unknown transaction hashes and subscription IDs. In practice, treat `400` with a "not found" message as your not-found case.
+
+<Note>
+  The messages deliberately do not distinguish "does not exist" from "belongs to another organization". Both return the same text, so the API cannot be used to probe whether a reference exists elsewhere.
+</Note>
+
+### 500 on a transfer means "unknown", not "failed"
+
+<Warning>
+  A `500` or a timeout on `POST /transfers` does **not** mean nothing happened. The transaction may have been broadcast and the response lost.
+
+  Retry with the same `Idempotency-Key` — never a new one — or check `GET /transactions` before taking any other action. See [Idempotency](/guides/idempotency).
+</Warning>
+
+For every other endpoint, `500` is safe to retry: they are reads, or writes that fail loudly on duplication.
+
+Server errors never expose internal details. The message is always:
+
+```json
+{
+  "message": "An error occurred while processing your request. Please try again later or contact support.",
+  "code": 500
+}
+```
+
+This includes upstream blockchain node failures, which is why [`GET /wallets/{ref}/balances`](/api-reference/wallets/get-balances) — the one endpoint that talks to a chain on every request — is the most likely to return one.
+
+## Common validation messages
+
+| `path` | `message` | Endpoint |
+| --- | --- | --- |
+| `walletReference` | `A wallet with this reference already exists for this organization` | `POST /wallets` |
+| `walletReference` | `walletReference must only contain alphanumeric characters, underscores, or hyphens, with no spaces` | `POST /wallets` |
+| `walletReference` | `Wallet not found or not owned by organization` | `GET /wallets/{ref}`, balances |
+| `walletReference` | `Wallet not found or does not belong to this organization` | `PATCH`, wallet transactions, `GET /transactions` |
+| `network` | `Network not found` / `Network is currently inactive` | `POST /wallets`, transfers |
+| `asset` | `Asset USDC is not supported on network bitcoin` | transfers |
+| `asset` | `Asset USDT is currently inactive on network tron` | transfers |
+| `fromWalletReference` | `Sender wallet not found or not owned by organization` | transfers |
+| `fromWalletReference` | `Sender wallet is currently inactive` | transfers |
+| `toAddress` | `Recipient address is not a valid address for this network` | transfers |
+| `amount` | `Amount must be a positive number` | transfers |
+| `status` | `Status must be 'active' or 'inactive'` | `PATCH /wallets/{ref}` |
+| `txHash` | `Transaction not found or does not belong to this organization` | `GET /transfers/{txHash}` |
+| `webhookUrl` | `Must be a valid URL` / `A webhook subscription for this URL already exists` | `POST /webhooks/subscriptions` |
+| `webhookSecret` | `Signing secret must be at least 8 characters long` | `POST /webhooks/subscriptions` |
+| `subscriptionId` | `subscriptionId must be a valid UUID` | delete, rotate |
+| `subscriptionId` | `Webhook subscription not found or does not belong to this organization` | delete, rotate |
+| `limit` | `Number must be less than or equal to 100` | any paginated list |
+
+<Note>
+  Two wordings exist for a missing wallet — `not owned by organization` and `does not belong to this organization` — depending on the endpoint. Match on the status code and `path`, not the message text.
+</Note>
+
+## Handling errors in code
+
+Parse the envelope once, at the client boundary, and raise something typed.
+
+<CodeGroup>
+
+```javascript Node.js
+export class TraycerError extends Error {
+    constructor({ message, code, validationErrors }, status) {
+        super(message);
+        this.name = "TraycerError";
+        this.code = code ?? status;
+        this.validationErrors = validationErrors ?? [];
+    }
+
+    /** True when the request can be retried unchanged. */
+    get isRetryable() {
+        return this.code === 429 || this.code >= 500;
+    }
+
+    /** All messages for one field. */
+    fieldErrors(field) {
+        return this.validationErrors
+            .filter((e) => e.path?.[0] === field)
+            .map((e) => e.message);
+    }
+}
+
+export const traycer = async (path, options = {}) => {
+    const res = await fetch(`${process.env.TRAYCER_BASE_URL}${path}`, {
+        ...options,
+        headers: {
+            "x-api-key": process.env.TRAYCER_API_KEY,
+            "Content-Type": "application/json",
+            ...options.headers,
+        },
+        body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+
+    const payload = await res.json();
+    if (!res.ok) throw new TraycerError(payload, res.status);
+    return payload.data;
+};
+```
+
+```python Python
+import os
+import requests
+
+
+class TraycerError(Exception):
+    def __init__(self, payload, status):
+        super().__init__(payload.get("message", "Unknown error"))
+        self.code = payload.get("code", status)
+        self.validation_errors = payload.get("validationErrors", [])
+
+    @property
+    def is_retryable(self):
+        return self.code == 429 or self.code >= 500
+
+    def field_errors(self, field):
+        return [
+            e["message"]
+            for e in self.validation_errors
+            if e.get("path", [None])[0] == field
+        ]
+
+
+def traycer(path, method="GET", body=None, headers=None):
+    res = requests.request(
+        method,
+        f"{os.environ['TRAYCER_BASE_URL']}{path}",
+        headers={"x-api-key": os.environ["TRAYCER_API_KEY"], **(headers or {})},
+        json=body,
+    )
+
+    payload = res.json()
+    if not res.ok:
+        raise TraycerError(payload, res.status_code)
+
+    return payload["data"]
+```
+
+</CodeGroup>
+
+Then branch on `code`, not on message text:
+
+```javascript
+try {
+    await traycer("/transfers", { method: "POST", body, headers: { "Idempotency-Key": key } });
+} catch (error) {
+    if (!(error instanceof TraycerError)) throw error;
+
+    switch (error.code) {
+        case 400:
+            // Rejected before broadcasting. Nothing was sent.
+            return reject(error.validationErrors.length ? error.fieldErrors("amount") : error.message);
+        case 403:
+            return alertOps("API key is read-only or IP is blocked");
+        case 409:
+            return retryLater();          // same key
+        case 422:
+            throw error;                  // key reuse bug
+        case 429:
+            return retryAfterBackoff();
+        default:
+            if (error.code >= 500) return markUnknownOutcome();
+            throw error;
+    }
+}
+```
+
+## Retry policy
+
+| Situation | Retry? | How |
+| --- | --- | --- |
+| `429` | Yes | Honour `retry-after`, then exponential backoff. |
+| `500`, `504` on a read | Yes | Exponential backoff with jitter. |
+| `500` on `POST /transfers` | Yes — with the same `Idempotency-Key` | Never with a new key. |
+| `409` | Yes | Same key, after a short wait. |
+| `400`, `401`, `403`, `422` | No | The request must change first. |
+
+<Tip>
+  Cap total attempts and record the final state. A payout stuck in "unknown" after retries should page a human, not silently disappear.
+</Tip>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Rate limits" icon="gauge-high" href="/guides/rate-limits">
+    What triggers a `429` and how to stay under it.
+  </Card>
+  <Card title="Idempotency" icon="shield-check" href="/guides/idempotency">
+    Why retrying a transfer is safe when you do it right.
+  </Card>
+</CardGroup>

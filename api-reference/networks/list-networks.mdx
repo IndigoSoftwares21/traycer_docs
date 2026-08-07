@@ -1,0 +1,50 @@
+---
+title: "List networks"
+description: "Every active network and the assets available on each."
+openapi: "GET /networks"
+---
+
+<Note>
+  Requires a `read` scope key. Takes no parameters.
+</Note>
+
+Use this instead of hardcoding a network list. Only **active** networks and **active** coins are returned, so a chain or asset that has been disabled simply disappears from the response — which is also why a transfer can be rejected with `Network is currently inactive`.
+
+## What to do with the response
+
+| Field | Why it matters |
+| --- | --- |
+| `networkName` | The value you pass as `network` when creating wallets and sending transfers. |
+| `coinSymbol` | The value you pass as `asset`. |
+| `coinIsNative` | `true` for the currency that pays this chain's fees. This is how you determine, generically, what a wallet needs for gas. |
+| `coinContractAddress` | The live token contract for the environment you are pointed at — testnet deployments return testnet contracts. `null` for native currencies. |
+| `displayName` / `tokenStandard` | Pre-formatted labels like `USDT (TRC20)`, so you do not have to build the standard mapping yourself. |
+| `coinDecimals` | Informational only. The API takes and returns whole units. |
+
+```javascript Building a network picker
+const networks = await traycer("/networks");
+
+const options = networks.flatMap((network) =>
+    network.coins.map((coin) => ({
+        network: network.networkName,
+        asset: coin.coinSymbol,
+        label: `${coin.displayName} on ${network.networkName}`,
+        isGasToken: coin.coinIsNative,
+    })),
+);
+```
+
+<Tip>
+  This response changes rarely — often not at all during a deployment's lifetime. Fetch it at startup and refresh hourly rather than calling it per request. See [Rate limits](/guides/rate-limits).
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Networks and assets" icon="link" href="/guides/networks-and-assets">
+    Fee mechanics per chain, and the balance-key table.
+  </Card>
+  <Card title="Create wallet" icon="wallet" href="/api-reference/wallets/create-wallet">
+    Provision an address on one of these networks.
+  </Card>
+</CardGroup>

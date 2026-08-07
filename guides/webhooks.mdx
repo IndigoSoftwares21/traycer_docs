@@ -1,0 +1,346 @@
+---
+title: "Webhooks"
+description: "Get notified when funds move — and verify that the notification actually came from Traycer."
+icon: "bell"
+---
+
+A background poller scans the chain for transfers touching your wallets. When it finds one, it records the transaction and posts it to every active webhook URL you have registered. You do not poll us.
+
+Two events exist:
+
+| Event | Fires when |
+| --- | --- |
+| `transaction.deposit` | An incoming transfer to one of your wallets is indexed. |
+| `transaction.withdrawal` | An outgoing transfer from one of your wallets is indexed — including ones you broadcast via `POST /transfers`. |
+
+<Note>
+  **Indexing currently runs on Tron only.** Deposits and withdrawals on Ethereum, BSC, and Bitcoin are not detected, so no webhooks fire for them and they do not appear in `GET /transactions`. Wallet creation, balances, quoting, and sending all work normally on those chains.
+</Note>
+
+## Registering an endpoint
+
+```bash
+curl -X POST $BASE/webhooks/subscriptions \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookSecret": "a-long-random-string-you-generated"
+  }'
+```
+
+```json 201
+{
+  "message": "Webhook subscription created successfully",
+  "code": 201,
+  "data": {
+    "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookIsActive": true,
+    "createdAt": "2026-08-07T14:40:00.000Z"
+  }
+}
+```
+
+`webhookSecret` must be at least 8 characters. Use something long and random — it is the only thing standing between your handler and a forged deposit event. The secret is never returned by any endpoint afterwards; store it when you set it.
+
+One subscription per URL per organization. Registering the same URL twice returns `400` with `A webhook subscription for this URL already exists`. You may register several distinct URLs, and **every** active subscription receives **every** event — there is no per-event or per-wallet filtering.
+
+## The payload
+
+```json
+{
+  "event": "transaction.deposit",
+  "timestamp": "2026-08-07T14:31:02.000Z",
+  "data": {
+    "transactionId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+    "organizationId": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "txHash": "3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+    "txFromAddress": "TXk9YourCounterpartyAddress00000000",
+    "txToAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "txAmount": 100,
+    "txAsset": "USDT",
+    "txType": "deposit",
+    "txStatus": "confirmed",
+    "blockNumber": 61234567,
+    "createdAt": "2026-08-07T14:31:02.000Z"
+  }
+}
+```
+
+`data` is the full indexed transaction row. `transaction.withdrawal` has the identical shape with `txType: "withdrawal"`.
+
+<Warning>
+  `data` carries `walletId` — Traycer's internal identifier — **not** `walletReference`. To map an event back to your user, either keep a `walletId → walletReference` lookup when you create wallets, or match on `txToAddress` / `txFromAddress`, which you already store.
+</Warning>
+
+Deliveries carry two headers you care about:
+
+| Header | Value |
+| --- | --- |
+| `Content-Type` | `application/json` |
+| `X-Traycer-Signature` | `sha256=` followed by the hex HMAC-SHA256 of the raw body |
+
+## Verifying the signature
+
+<Warning>
+  **Always verify.** Your webhook URL is not a secret — it appears in logs, proxies, and browser history. Without signature verification, anyone who learns the URL can post a fake `transaction.deposit` and credit an account that was never funded.
+</Warning>
+
+The signature is `HMAC-SHA256(rawRequestBody, webhookSecret)`, hex-encoded, prefixed with `sha256=`. Compute it over the **raw bytes** you received — not over a re-serialized object, because key order and whitespace would differ and the digest would not match.
+
+<CodeGroup>
+
+```javascript Express
+import crypto from "crypto";
+import express from "express";
+
+const app = express();
+
+// Capture the raw body — this must run before any JSON body parser
+app.post(
+    "/webhooks/traycer",
+    express.raw({ type: "application/json" }),
+    (req, res) => {
+        const received = req.headers["x-traycer-signature"];
+
+        const expected =
+            "sha256=" +
+            crypto
+                .createHmac("sha256", process.env.TRAYCER_WEBHOOK_SECRET)
+                .update(req.body) // raw Buffer
+                .digest("hex");
+
+        const receivedBuffer = Buffer.from(received ?? "", "utf8");
+        const expectedBuffer = Buffer.from(expected, "utf8");
+
+        const valid =
+            receivedBuffer.length === expectedBuffer.length &&
+            crypto.timingSafeEqual(receivedBuffer, expectedBuffer);
+
+        if (!valid) return res.status(401).send("Invalid signature");
+
+        const event = JSON.parse(req.body.toString("utf8"));
+
+        // Acknowledge immediately, process out of band
+        res.status(200).send("ok");
+        void enqueue(event);
+    },
+);
+```
+
+```python Flask
+import hashlib
+import hmac
+import os
+
+from flask import Flask, request
+
+app = Flask(__name__)
+
+
+@app.post("/webhooks/traycer")
+def traycer_webhook():
+    received = request.headers.get("X-Traycer-Signature", "")
+
+    expected = "sha256=" + hmac.new(
+        os.environ["TRAYCER_WEBHOOK_SECRET"].encode(),
+        request.get_data(),  # raw bytes
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(received, expected):
+        return "Invalid signature", 401
+
+    enqueue(request.get_json())
+    return "ok", 200
+```
+
+```go Go
+package main
+
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+    "io"
+    "net/http"
+    "os"
+)
+
+func handleWebhook(w http.ResponseWriter, r *http.Request) {
+    body, err := io.ReadAll(r.Body)
+    if err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+
+    mac := hmac.New(sha256.New, []byte(os.Getenv("TRAYCER_WEBHOOK_SECRET")))
+    mac.Write(body)
+    expected := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+    if !hmac.Equal([]byte(r.Header.Get("X-Traycer-Signature")), []byte(expected)) {
+        http.Error(w, "invalid signature", http.StatusUnauthorized)
+        return
+    }
+
+    w.WriteHeader(http.StatusOK)
+    go process(body)
+}
+```
+
+</CodeGroup>
+
+<Warning>
+  Compare with a constant-time function — `crypto.timingSafeEqual`, `hmac.compare_digest`, `hmac.Equal` — never `===`. A byte-by-byte comparison leaks how much of the digest was correct, which is enough to forge one given enough attempts.
+
+  Note that `timingSafeEqual` throws if the two buffers differ in length, so check lengths first, as above.
+</Warning>
+
+## Delivery semantics
+
+<CardGroup cols={2}>
+  <Card title="Delivered once" icon="1">
+    A single attempt per subscription. **No automatic retry.** Success or failure is logged either way.
+  </Card>
+  <Card title="10 second timeout" icon="stopwatch">
+    A handler that takes longer is recorded as a failed delivery — even if it eventually completed its work.
+  </Card>
+  <Card title="2xx means accepted" icon="check">
+    Any 2xx status counts as success. Anything else, or a connection error, counts as failure.
+  </Card>
+  <Card title="Fanned out to every subscription" icon="share-nodes">
+    Deliveries run concurrently and independently. One slow endpoint does not delay another.
+  </Card>
+</CardGroup>
+
+<Warning>
+  **There is no retry.** If your endpoint is down, deploying, or briefly overloaded, those events are gone permanently. Webhooks are a latency optimization, not a delivery guarantee.
+
+  Anything financially material must also be reconciled against [`GET /transactions`](/api-reference/transactions/list-transactions). A sweep every few minutes over recent transactions, matched against what you have already processed, closes the gap.
+</Warning>
+
+### Writing a handler that survives this
+
+<Steps>
+  <Step title="Verify, then acknowledge, then work">
+    Respond `200` as soon as the signature checks out. Push the event onto a queue and process it there. Ten seconds sounds generous until your database is slow.
+  </Step>
+  <Step title="Deduplicate on txHash">
+    Treat `data.txHash` (with `txType`) as the idempotency key for your own processing. Re-delivery is not the only source of duplicates — your reconciliation sweep will see the same transaction.
+  </Step>
+  <Step title="Never trust the amount without verifying the signature">
+    An unverified payload is an unauthenticated instruction to credit an account. This is the failure mode that actually costs money.
+  </Step>
+  <Step title="Reconcile on a schedule">
+    Poll `GET /transactions` periodically for anything your webhook handler never saw. This is what makes missed deliveries survivable.
+  </Step>
+</Steps>
+
+```javascript A dedupe-safe processor
+const processEvent = async (event) => {
+    const { txHash, txType, txAmount, txAsset, txToAddress } = event.data;
+
+    // Unique index on (txHash, txType) makes replays harmless
+    const inserted = await db.ledger.insertIfAbsent({
+        txHash,
+        txType,
+        amount: txAmount,
+        asset: txAsset,
+        address: txToAddress,
+    });
+
+    if (!inserted) return; // already handled
+
+    if (txType === "deposit") {
+        await creditUserByAddress({ address: txToAddress, amount: txAmount, asset: txAsset });
+    }
+};
+```
+
+## Managing subscriptions
+
+```bash List
+curl $BASE/webhooks/subscriptions -H "x-api-key: $TRAYCER_API_KEY"
+```
+
+Returns everything under `data.subscriptions`. Not paginated, takes no parameters, and never includes signing secrets.
+
+```bash Delete
+curl -X DELETE $BASE/webhooks/subscriptions/b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e \
+  -H "x-api-key: $TRAYCER_API_KEY"
+```
+
+Deletion is immediate and permanent. Past delivery logs are retained; nothing further is sent to that URL.
+
+## Rotating a secret
+
+```bash
+curl -X POST $BASE/webhooks/subscriptions/b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e/rotate-secret \
+  -H "x-api-key: $TRAYCER_API_KEY"
+```
+
+```json 200
+{
+  "message": "Webhook signing secret rotated successfully",
+  "code": 200,
+  "data": {
+    "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookSecret": "whsec_4f2a8b1c9d3e5f7a0b2c4d6e8f1a3b5c"
+  }
+}
+```
+
+<Warning>
+  **This response is the only time the new secret is shown, and the old secret stops working immediately.** There is no overlap window where both verify.
+
+  Between rotating and deploying the new secret, every delivery will fail your signature check — and failed deliveries are not retried. Have the new value ready to deploy before you make this call.
+</Warning>
+
+A cleaner rotation, if you cannot deploy instantly: register a second subscription at a second URL with the new secret, move traffic, then delete the first. Both receive every event in the meantime, so nothing is lost.
+
+## Testing locally
+
+<Steps>
+  <Step title="Expose your handler">
+    `ngrok http 3000` or `cloudflared tunnel --url http://localhost:3000` gives you a public HTTPS URL.
+  </Step>
+  <Step title="Subscribe with it">
+    Register the tunnel URL and a throwaway secret.
+  </Step>
+  <Step title="Trigger a real event">
+    Send a small amount to one of your wallet addresses on Tron. Within a few poll cycles — the poller runs every 10 seconds and stays 3 confirmations behind — the deposit fires.
+  </Step>
+  <Step title="Clean up">
+    Delete the tunnel subscription before it expires, or dead deliveries accumulate in your logs.
+  </Step>
+</Steps>
+
+<Tip>
+  To exercise your verification code without waiting for a chain, generate a signature yourself:
+
+  ```bash
+  BODY='{"event":"transaction.deposit","timestamp":"2026-08-07T14:31:02.000Z","data":{"txHash":"test","txAmount":1,"txAsset":"USDT","txType":"deposit","txToAddress":"TJRab..."}}'
+  SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" -hex | awk '{print $2}')
+
+  curl -X POST http://localhost:3000/webhooks/traycer \
+    -H "Content-Type: application/json" \
+    -H "X-Traycer-Signature: sha256=$SIG" \
+    -d "$BODY"
+  ```
+
+  Flip one character of `$BODY` and confirm your handler rejects it.
+</Tip>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="List transactions" icon="list-check" href="/api-reference/transactions/list-transactions">
+    The reconciliation endpoint webhooks depend on.
+  </Card>
+  <Card title="Create subscription" icon="code" href="/api-reference/webhooks/create-subscription">
+    Try it in the playground.
+  </Card>
+</CardGroup>

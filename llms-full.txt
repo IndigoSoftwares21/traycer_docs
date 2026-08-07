@@ -1,0 +1,966 @@
+# Traycer HTTP API — Complete Reference
+
+> Traycer provisions blockchain wallets on Bitcoin, Ethereum, BSC, and Tron, reads live on-chain
+> balances, prices and broadcasts transfers, and pushes webhook events when funds move. Every wallet
+> is addressed by an identifier the integrator chooses, so no Traycer identifiers need to be stored.
+
+This file is the complete API context in one place: every endpoint, field, error message, and
+behavioural detail. It is generated from the live implementation, not from a design document.
+
+---
+
+## 1. Base URL and versioning
+
+```
+Production   https://your-domain.com/api/v1/http
+Local        http://localhost:6969/api/v1/http
+```
+
+`your-domain.com` is a placeholder — substitute the deployed host. The `v1` segment comes from the
+server's `API_VERSION` environment variable and defaults to `v1`. All paths below are relative to
+this base.
+
+---
+
+## 2. Authentication
+
+Every request carries an API key in the `x-api-key` header. There is no OAuth flow, no session
+token, and no organization ID parameter — the key identifies the organization.
+
+```
+x-api-key: trc_live_a1b2c3d4_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c
+```
+
+Key format is `{prefix}_{secret}`, split on the **last** underscore. The server looks the key up by
+prefix, then verifies the secret against a bcrypt hash. Keys are created in the dashboard and shown
+once; only the hash is stored, so a lost key must be replaced rather than recovered.
+
+### Scopes
+
+| Scope | Permits |
+|-------|---------|
+| `read` | `GET /networks`, `GET /wallets`, `GET /wallets/{ref}`, `GET /wallets/{ref}/balances`, `GET /wallets/{ref}/transactions`, `POST /transfers/quote`, `GET /transfers/{txHash}`, `GET /transactions`, `GET /webhooks/subscriptions` |
+| `read_write` | Everything in `read`, plus `POST /wallets`, `PATCH /wallets/{ref}`, `POST /transfers`, `POST /webhooks/subscriptions`, `DELETE /webhooks/subscriptions/{id}`, `POST /webhooks/subscriptions/{id}/rotate-secret` |
+
+`POST /transfers/quote` requires only `read` despite being a POST: scope is declared per route rather
+than inferred from HTTP method, and quoting moves no funds.
+
+### IP allowlisting
+
+A key may be restricted to IP addresses or CIDR ranges. Requests from other addresses return `403`
+even with a valid key. An empty allowlist permits all addresses. The check uses the client IP as seen
+by the server (proxy headers are trusted).
+
+### Expiry
+
+A key may carry an expiry timestamp. Expiry is evaluated **before** the secret comparison, so an
+expired key reports expiry rather than an invalid secret. No advance warning is issued.
+
+### Authentication errors
+
+| Status | Message | Cause |
+|--------|---------|-------|
+| 401 | `Missing x-api-key header` | Header absent or not a string |
+| 401 | `Invalid API Key format` | Not in `prefix_secret` shape |
+| 401 | `Invalid API Key prefix or key not found` | No key matches the prefix |
+| 401 | `API Key has expired` | Past expiry |
+| 401 | `Invalid API Key secret` | Prefix matched, secret did not |
+| 403 | `IP address {ip} is not whitelisted for this API key` | Source address not allowlisted |
+| 403 | `Insufficient permissions. API Key has read-only access.` | `read` key on a write route |
+
+Keys are independent: deleting one has no effect on wallets, balances, in-flight transfers, or
+webhook subscriptions.
+
+---
+
+## 3. Response envelope
+
+Every response, success or failure, uses the same JSON shape.
+
+Success:
+```json
+{ "message": "Wallets retrieved successfully", "code": 200, "data": { } }
+```
+
+`data` is `null` — not omitted — when an endpoint has nothing to return.
+
+Error:
+```json
+{ "message": "Insufficient permissions. API Key has read-only access.", "code": 403 }
+```
+
+Validation error (note the message is literally `Validation failed`):
+```json
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["amount"], "message": "Amount must be a positive number" }
+  ]
+}
+```
+
+Multiple fields can fail simultaneously; iterate `validationErrors` rather than reading index 0.
+
+Server errors never expose internals. Every 500 returns:
+```json
+{
+  "message": "An error occurred while processing your request. Please try again later or contact support.",
+  "code": 500
+}
+```
+
+Serialization notes: dates are ISO 8601 UTC strings (`2026-08-07T14:22:31.000Z`); BigInt values are
+serialized as strings.
+
+### Status codes
+
+| Code | Meaning | Action |
+|------|---------|--------|
+| 200 | Success | — |
+| 201 | Created (also returned by `POST /transfers/quote`, which creates nothing) | — |
+| 400 | Invalid request, including "not found" cases | Fix the request |
+| 401 | Missing/malformed/unknown/expired key | Fix credentials |
+| 403 | Wrong scope, or IP not allowlisted | Use `read_write`, or allowlist |
+| 404 | Resource missing (rare — see below) | Do not retry |
+| 409 | Idempotency key still in progress | Wait, retry same key |
+| 422 | Idempotency key reused with different payload | Bug; do not retry |
+| 429 | Rate limited | Back off per `retry-after` |
+| 500 | Server or upstream node failure | Retry with backoff (see transfer caveat) |
+| 504 | Database query timeout | Retry with backoff |
+
+**Missing resources return 400, not 404.** Existence is checked during request validation, so an
+unknown wallet reference, transaction hash, or subscription ID surfaces as a field-level validation
+error. Messages deliberately do not distinguish "does not exist" from "belongs to another
+organization".
+
+---
+
+## 4. Rate limiting
+
+Production deployments limit traffic to **60 requests per minute per IP address**. The limiter is not
+enabled outside production.
+
+Rate limit rejections come from the HTTP layer, before the application, and therefore do **not** use
+the standard envelope:
+
+```json
+{ "statusCode": 429, "error": "Too Many Requests", "message": "Rate limit exceeded, retry in 1 minute" }
+```
+
+Note `statusCode`, not `code`. Detect rate limiting by HTTP status, not by parsing the body.
+
+Headers on rate-limited responses: `retry-after`, `x-ratelimit-limit`, `x-ratelimit-remaining`,
+`x-ratelimit-reset`. `x-ratelimit-remaining` appears on successful responses too.
+
+The limit is per IP, not per key — everything behind the same egress address shares one budget.
+
+---
+
+## 5. Networks and assets
+
+| Network | Native | Tokens | Standard |
+|---------|--------|--------|----------|
+| `bitcoin` | `BTC` | — | — |
+| `ethereum` | `ETH` | `USDT`, `USDC` | ERC20 |
+| `bsc` | `BNB` | `USDT`, `USDC` | BEP20 |
+| `tron` | `TRX` | `USDT`, `USDC` | TRC20 |
+
+### The gas rule (most common integration failure)
+
+Token transfers are paid for in the chain's **native currency**. A wallet holding 500 USDT and 0 TRX
+cannot send USDT. Always call `POST /transfers/quote` and branch on `isSufficient`.
+
+### Fee mechanics
+
+- **Tron** — TRC20 transfers are simulated against the contract via `triggerConstantContract` to
+  measure energy, priced at 420 sun per energy unit, plus ~0.345 TRX bandwidth. Falls back to 32,000
+  energy (or 15,000 if the destination already holds the token) when simulation fails. Native TRX
+  transfers cost ~0.267 TRX bandwidth. Sending to an address that does not yet exist on-chain adds
+  **1 TRX** account activation cost. Fee asset: `TRX`.
+- **Ethereum / BSC** — gas limit 21,000 (native) or 65,000 (token), multiplied by the node's current
+  gas price. Falls back to 3 Gwei if the fee lookup fails. Fee asset: `ETH` or `BNB`.
+- **Bitcoin** — next-block sat/vByte rate applied to an assumed ~140 vByte native SegWit
+  transaction. Falls back to 15 sat/vByte. Fee asset: `BTC`.
+
+`estimatedFee` is an estimate; actual on-chain cost may differ, especially on Ethereum.
+
+### Chain identifiers
+
+Wallets store a `walletChain` that encodes network **and** environment:
+
+| Network | Production | Non-production |
+|---------|-----------|----------------|
+| tron | `tron_mainnet` | `tron_nile` |
+| ethereum | `ethereum_mainnet` | `ethereum_sepolia` |
+| bsc | `bsc_mainnet` | `bsc_testnet` |
+| bitcoin | `bitcoin_mainnet` | `bitcoin_testnet` |
+
+The environment is chosen by server configuration, not per request.
+
+### Balance keys per network
+
+| Network | Keys in `balances` / `currentBalances` |
+|---------|----------------------------------------|
+| bitcoin | `btc` |
+| ethereum | `eth`, `usdt`, `usdc` |
+| bsc | `bnb`, `usdt`, `usdc` |
+| tron | `trx`, `usdt`, `usdc` |
+
+Values are whole units (`430.25` = 430.25 USDT). Read by key; treat missing keys as zero.
+
+### Amounts
+
+All amounts in requests and responses are **whole units**. Send `100` for 100 USDT, never
+`100000000`. `coinDecimals` from `GET /networks` is informational only.
+
+---
+
+## 6. Endpoints
+
+### 6.1 GET /networks — scope `read`
+
+No parameters. Returns only active networks with only active coins.
+
+Response `200`, `data` is an **array**:
+```json
+{
+  "message": "Networks fetched successfully",
+  "code": 200,
+  "data": [
+    {
+      "networkId": "3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30",
+      "networkName": "ethereum",
+      "networkIsActive": true,
+      "createdAt": "2026-01-14T09:02:11.000Z",
+      "coins": [
+        {
+          "coinId": "7a2b1c40-9d3e-4f11-bb02-8c1d2e3f4a5b",
+          "networkId": "3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30",
+          "coinSymbol": "ETH",
+          "coinName": "Ethereum",
+          "coinContractAddress": null,
+          "coinDecimals": 18,
+          "coinIsNative": true,
+          "coinIsActive": true,
+          "displayName": "ETH",
+          "tokenStandard": "Native"
+        },
+        {
+          "coinSymbol": "USDT",
+          "coinContractAddress": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+          "coinDecimals": 6,
+          "coinIsNative": false,
+          "coinIsActive": true,
+          "displayName": "USDT (ERC20)",
+          "tokenStandard": "ERC20"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Coins are ordered native-first, then by symbol. `tokenStandard` is derived: `Native` for native
+coins, `TRC20` on tron, `BEP20` on bsc, `ERC20` otherwise. `displayName` is `SYMBOL (STANDARD)` for
+tokens, bare symbol for natives.
+
+### 6.2 POST /wallets — scope `read_write`
+
+Body:
+
+| Field | Type | Required | Rules |
+|-------|------|----------|-------|
+| `walletReference` | string | yes | 1–255 chars, `^[a-zA-Z0-9_-]+$`, unique per organization |
+| `network` | string | yes | `bitcoin`, `ethereum`, `bsc`, or `tron`; must be active |
+
+Response `201`:
+```json
+{
+  "message": "Wallet created successfully",
+  "code": 201,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "network": "tron",
+    "walletStatus": "active",
+    "coins": [ /* active coins on this network, same shape as GET /networks */ ],
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+The private key is generated server-side, encrypted under an organization-derived key, and never
+returned by any endpoint. There is no export. The address is live immediately.
+
+Errors (all `400` with `validationErrors`):
+- `walletReference`: `A wallet with this reference already exists for this organization`
+- `walletReference`: `walletReference must only contain alphanumeric characters, underscores, or hyphens, with no spaces`
+- `network`: `Network not found`
+- `network`: `Network is currently inactive`
+
+### 6.3 GET /wallets — scope `read`
+
+Query parameters:
+
+| Parameter | Type | Default | Notes |
+|-----------|------|---------|-------|
+| `page` | integer | 1 | ≥ 1 |
+| `limit` | integer | 20 | 1–100; >100 is rejected, not clamped |
+| `search` | string | — | Case-insensitive partial match on `wallet_reference` OR `wallet_address` |
+| `network` | string | — | **Exact match on `walletChain`** — pass `tron_mainnet`, not `tron` |
+| `status` | string | — | `active` or `inactive` |
+
+Response `200`:
+```json
+{
+  "message": "Wallets retrieved successfully",
+  "code": 200,
+  "data": {
+    "wallets": [
+      {
+        "walletReference": "user_8842",
+        "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+        "walletChain": "tron_mainnet",
+        "network": "tron",
+        "walletStatus": "active",
+        "coins": [],
+        "createdAt": "2026-08-07T14:22:31.000Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 143, "totalPages": 8 }
+  }
+}
+```
+
+Ordered by `created_at` descending. `network` and `coins` are resolved from the stored
+`walletChain`; `coins` is `[]` when no matching network row exists.
+
+**Gotcha:** `?network=tron` matches nothing, because the filter compares against `walletChain`.
+
+### 6.4 GET /wallets/{walletReference} — scope `read`
+
+Response `200`:
+```json
+{
+  "message": "Wallet details fetched successfully",
+  "code": 200,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "network": "tron",
+    "walletStatus": "active",
+    "coins": [],
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+Error `400`: `walletReference` → `Wallet not found or not owned by organization`.
+
+### 6.5 PATCH /wallets/{walletReference} — scope `read_write`
+
+Body: `{ "status": "active" | "inactive" }`.
+
+Response `200`. **The shape differs from other wallet endpoints** — it returns the stored database
+record, including internal identifiers, and omits `network` and `coins`:
+```json
+{
+  "message": "Wallet status updated successfully",
+  "code": 200,
+  "data": {
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "organizationId": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "walletStatus": "inactive",
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+**`inactive` does not stop deposits.** The address remains live on-chain; incoming transfers are
+still detected, recorded, and webhooked. What it blocks is outgoing transfers: both `POST /transfers`
+and `POST /transfers/quote` reject the wallet with `Sender wallet is currently inactive`.
+
+Errors (`400`):
+- `walletReference`: `Wallet not found or does not belong to this organization`
+- `status`: `Status must be 'active' or 'inactive'`
+
+### 6.6 GET /wallets/{walletReference}/balances — scope `read`
+
+No parameters. Reads live from the chain; nothing is cached. Slowest endpoint; returns `500` when the
+upstream node is unreachable.
+
+Response `200`:
+```json
+{
+  "message": "Balances retrieved successfully",
+  "code": 200,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "balances": { "trx": 12.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+Error `400`: `walletReference` → `Wallet not found or not owned by organization`.
+
+### 6.7 GET /wallets/{walletReference}/transactions — scope `read`
+
+Query parameters: `page` (default 1), `limit` (default 20, max 100), `type`
+(`deposit`|`withdrawal`), `status` (`pending`|`confirmed`|`failed`).
+
+Response `200`:
+```json
+{
+  "message": "Wallet transactions retrieved successfully",
+  "code": 200,
+  "data": {
+    "transactions": [
+      {
+        "transactionId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+        "txHash": "3f8a91c4d5e6...",
+        "txFromAddress": "TXk9...",
+        "txToAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+        "txAmount": 100,
+        "txAsset": "USDT",
+        "txType": "deposit",
+        "txStatus": "confirmed",
+        "blockNumber": 61234567,
+        "createdAt": "2026-08-07T14:31:02.000Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 20, "total": 1, "totalPages": 1 }
+  }
+}
+```
+
+Error `400`: `walletReference` → `Wallet not found or does not belong to this organization`.
+
+### 6.8 POST /transfers/quote — scope `read`
+
+Body:
+
+| Field | Type | Rules |
+|-------|------|-------|
+| `fromWalletReference` | string | 1–255 chars; must exist, be owned, and be `active` |
+| `toAddress` | string | Non-empty; validated against the network's address format |
+| `amount` | number | Strictly positive; whole units |
+| `asset` | string | Must exist and be active on `network` |
+| `network` | string | Must exist and be active |
+
+Response **`201`** (not 200):
+```json
+{
+  "message": "Transfer quote generated successfully",
+  "code": 201,
+  "data": {
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron",
+    "estimatedFee": 14.785,
+    "feeAsset": "TRX",
+    "isSufficient": true,
+    "reason": null,
+    "currentBalances": { "trx": 42.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+`reason` is always present: `null` when sufficient, otherwise one of:
+- `Insufficient {ASSET} balance for transfer amount`
+- `Insufficient native {NATIVE} gas balance. Estimated network fee is {fee} {NATIVE}.`
+- `Insufficient {NATIVE} balance for transfer amount` (native transfers)
+- `Insufficient {NATIVE} to cover estimated transfer fee of {fee} {NATIVE}` (native transfers)
+
+An insufficient balance is **not an error** here — it is a successful quote with
+`isSufficient: false`.
+
+Validation errors (`400`):
+- `network`: `Network not found` / `Network is currently inactive`
+- `asset`: `Asset {ASSET} is not supported on network {network}` / `Asset {ASSET} is currently inactive on network {network}`
+- `fromWalletReference`: `Sender wallet not found or not owned by organization` / `Sender wallet is currently inactive`
+- `toAddress`: `Recipient address is not a valid address for this network`
+- `amount`: `Amount must be a positive number`
+
+### 6.9 POST /transfers — scope `read_write`
+
+Same body as the quote endpoint. Optional header `Idempotency-Key`.
+
+Execution order:
+1. Schema validation (identical checks to the quote endpoint).
+2. Idempotency claim, if a key was supplied.
+3. Live balance read and fee re-quote; insufficient funds fail here with a plain `400`.
+4. Private key decryption, signing, broadcast.
+
+On failure after the claim, the idempotency key is released so a corrected retry under the same key
+proceeds normally.
+
+Response `201`:
+```json
+{
+  "message": "Transfer initiated successfully",
+  "code": 201,
+  "data": {
+    "txId": "3f8a91c4d5e6...",
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress",
+    "amount": 100,
+    "asset": "USDT"
+  }
+}
+```
+
+`txId` here is the **on-chain transaction hash**. (In `GET /transfers/{txHash}`, `txId` means the
+internal row ID instead — match this value against that endpoint's `txHash`.)
+
+`201` means broadcast, not confirmed. Blockchain transfers are irreversible.
+
+Two distinct `400` shapes:
+- Validation failure → `{ "message": "Validation failed", "code": 400, "validationErrors": [...] }`
+- Balance re-check failure → `{ "message": "Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.", "code": 400 }` (no `validationErrors`)
+
+Other statuses: `409` (idempotency key in progress), `422` (key reused with a different payload),
+`403` (read-only key), `429`, `500`.
+
+**A `500` or timeout means the outcome is unknown, not failed** — the transaction may have been
+broadcast before the response was lost. Retry with the same `Idempotency-Key`, or reconcile via
+`GET /transactions`. Never retry with a fresh key.
+
+### 6.10 GET /transfers/{txHash} — scope `read`
+
+Path parameter: `txHash`, 1–100 characters.
+
+Response `200`:
+```json
+{
+  "message": "Transaction details retrieved successfully",
+  "code": 200,
+  "data": {
+    "txId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+    "txHash": "3f8a91c4d5e6...",
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "walletReference": "user_8842",
+    "walletChain": "tron_mainnet",
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress",
+    "txAmount": 100,
+    "txAsset": "USDT",
+    "txType": "withdrawal",
+    "txStatus": "confirmed",
+    "blockNumber": 61234599,
+    "createdAt": "2026-08-07T14:35:10.000Z"
+  }
+}
+```
+
+Error `400`: `txHash` → `Transaction not found or does not belong to this organization`.
+
+A hash returned by `POST /transfers` is **not** immediately queryable — the poller must index its
+block first. A `400` shortly after broadcasting is expected and is not evidence of failure.
+
+### 6.11 GET /transactions — scope `read`
+
+Query parameters: `page` (default 1), `limit` (default 20, max 100), `walletReference` (must be
+owned, else `400`), `type` (`deposit`|`withdrawal`), `status` (`pending`|`confirmed`|`failed`),
+`asset` (exact, case-sensitive), `search` (case-insensitive partial on `tx_hash`,
+`tx_from_address`, `tx_to_address`).
+
+Response `200` — note rows are under **`items`**:
+```json
+{
+  "message": "Transactions retrieved successfully",
+  "code": 200,
+  "data": {
+    "items": [
+      {
+        "txId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+        "txHash": "3f8a91c4d5e6...",
+        "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+        "walletReference": "user_8842",
+        "walletChain": "tron_mainnet",
+        "fromAddress": "TXk9...",
+        "toAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+        "txAmount": 100,
+        "txAsset": "USDT",
+        "txType": "deposit",
+        "txStatus": "confirmed",
+        "blockNumber": 61234567,
+        "createdAt": "2026-08-07T14:31:02.000Z"
+      }
+    ],
+    "pagination": { "total": 143, "page": 1, "limit": 20, "totalPages": 8 }
+  }
+}
+```
+
+Error `400`: `walletReference` → `Wallet not found or does not belong to this organization`.
+
+### 6.12 POST /webhooks/subscriptions — scope `read_write`
+
+Body:
+
+| Field | Type | Rules |
+|-------|------|-------|
+| `webhookUrl` | string | Valid URL; one subscription per URL per organization |
+| `webhookSecret` | string | 8–255 characters |
+
+Response `201`:
+```json
+{
+  "message": "Webhook subscription created successfully",
+  "code": 201,
+  "data": {
+    "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookIsActive": true,
+    "createdAt": "2026-08-07T14:40:00.000Z"
+  }
+}
+```
+
+Errors (`400`): `webhookUrl` → `Must be a valid URL` / `A webhook subscription for this URL already
+exists`; `webhookSecret` → `Signing secret must be at least 8 characters long`.
+
+### 6.13 GET /webhooks/subscriptions — scope `read`
+
+No parameters, not paginated. Secrets are never returned.
+
+Response `200`:
+```json
+{
+  "message": "Webhook subscriptions retrieved successfully",
+  "code": 200,
+  "data": {
+    "subscriptions": [
+      {
+        "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+        "webhookUrl": "https://yourapp.com/webhooks/traycer",
+        "webhookIsActive": true,
+        "createdAt": "2026-08-07T14:40:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+### 6.14 DELETE /webhooks/subscriptions/{subscriptionId} — scope `read_write`
+
+`subscriptionId` must be a valid UUID belonging to the organization.
+
+Response `200`:
+```json
+{
+  "message": "Webhook subscription deleted successfully",
+  "code": 200,
+  "data": {
+    "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+    "webhookUrl": "https://yourapp.com/webhooks/traycer"
+  }
+}
+```
+
+Errors (`400`): `subscriptionId` → `subscriptionId must be a valid UUID` / `Webhook subscription not
+found or does not belong to this organization`.
+
+Deletion is permanent. Delivery logs are retained.
+
+### 6.15 POST /webhooks/subscriptions/{subscriptionId}/rotate-secret — scope `read_write`
+
+No request body. Generates `whsec_` + a UUID with hyphens stripped.
+
+Response `200`:
+```json
+{
+  "message": "Webhook signing secret rotated successfully",
+  "code": 200,
+  "data": {
+    "subscriptionId": "b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e",
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookSecret": "whsec_4f2a8b1c9d3e5f7a0b2c4d6e8f1a3b5c"
+  }
+}
+```
+
+**This is the only time the new secret is shown, and the old secret stops working immediately.**
+There is no overlap window. Deliveries between rotation and deployment will fail signature
+verification and are not retried.
+
+Errors (`400`): same as delete.
+
+---
+
+## 7. Idempotency
+
+Applies to `POST /transfers` only. Send an `Idempotency-Key` header with any unique string (a UUID
+works). The key is claimed against a SHA-256 hash of the normalized request payload, scoped to the
+organization.
+
+| Situation | Result |
+|-----------|--------|
+| First use | Claimed, transfer runs, response stored against the key |
+| Retry after success, same body | Stored response replayed verbatim with its original status. No second transfer |
+| Retry while first is in progress | `409` — `A request with this Idempotency-Key is still in progress` |
+| Same key, different body | `422` — `This Idempotency-Key was already used with a different request payload` |
+| Original transfer failed | Claim released; retry under the same key proceeds normally |
+
+Rules:
+- One key per logical transfer, persisted alongside the payout record before the first attempt.
+- Reuse it for every retry of that transfer.
+- Never reuse a key across different transfers.
+- Never derive keys from the payload — two legitimate identical payments would collide and the
+  second would silently replay the first.
+- Never generate a fresh key because a previous attempt "failed". That is how a lost response becomes
+  two transfers.
+
+The header is currently optional at the protocol level. It should be treated as mandatory.
+
+---
+
+## 8. Webhooks
+
+### Events
+
+| Event | Fires when |
+|-------|-----------|
+| `transaction.deposit` | An incoming transfer to a managed wallet is indexed |
+| `transaction.withdrawal` | An outgoing transfer from a managed wallet is indexed |
+
+### Payload
+
+`data` is the **full indexed transaction row**, not a simplified summary:
+
+```json
+{
+  "event": "transaction.deposit",
+  "timestamp": "2026-08-07T14:31:02.000Z",
+  "data": {
+    "transactionId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+    "organizationId": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "txHash": "3f8a91c4d5e6...",
+    "txFromAddress": "TXk9...",
+    "txToAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "txAmount": 100,
+    "txAsset": "USDT",
+    "txType": "deposit",
+    "txStatus": "confirmed",
+    "blockNumber": 61234567,
+    "createdAt": "2026-08-07T14:31:02.000Z"
+  }
+}
+```
+
+`data` carries `walletId` (internal), **not** `walletReference`. Map events back to your users via a
+stored `walletId → walletReference` mapping, or by matching `txToAddress` / `txFromAddress`.
+
+### Headers
+
+- `Content-Type: application/json`
+- `X-Traycer-Signature: sha256=<hex hmac>`
+
+### Signature verification
+
+The signature is `HMAC-SHA256(rawRequestBody, webhookSecret)`, hex-encoded, prefixed `sha256=`.
+Compute it over the **raw bytes received**, not a re-serialized object.
+
+```javascript
+import crypto from "crypto";
+
+const expected =
+    "sha256=" +
+    crypto.createHmac("sha256", process.env.TRAYCER_WEBHOOK_SECRET)
+          .update(rawBody)          // Buffer, not a parsed object
+          .digest("hex");
+
+const a = Buffer.from(req.headers["x-traycer-signature"] ?? "", "utf8");
+const b = Buffer.from(expected, "utf8");
+const valid = a.length === b.length && crypto.timingSafeEqual(a, b);
+```
+
+Use a constant-time comparison (`crypto.timingSafeEqual`, `hmac.compare_digest`, `hmac.Equal`), never
+`===`. Note `timingSafeEqual` throws on length mismatch, so check lengths first.
+
+Failing to verify allows anyone who learns the webhook URL to post fake deposit events.
+
+### Delivery semantics
+
+- **Attempted once. No automatic retry.** Outcome is logged either way.
+- 10 second timeout; slow handlers are recorded as failures.
+- Any `2xx` counts as success.
+- Deliveries fan out concurrently to every active subscription; every subscription receives every
+  event (no per-event or per-wallet filtering).
+
+Because deliveries are not retried, webhooks must be treated as a latency optimization rather than a
+delivery guarantee. Reconcile against `GET /transactions` for anything financially material, and
+deduplicate on `txHash` + `txType`.
+
+Recommended handler: verify signature → respond `200` immediately → process asynchronously.
+
+---
+
+## 9. Deposit detection (poller)
+
+A background poller scans blocks, matches transfers against managed wallet addresses, inserts
+transaction rows, and dispatches webhooks.
+
+- Runs every **10 seconds**.
+- Stays **3 confirmations** behind the chain head.
+- Processes at most 30 blocks per tick.
+- Inserts are conflict-tolerant, so re-scanning a block does not duplicate rows.
+- A transfer to a managed address produces a `deposit`; a transfer from one produces a `withdrawal`.
+  A transfer between two managed wallets produces both.
+
+**Current limitation: the poller runs on Tron only.** Wallet creation, balance reads, quotes, and
+transfers all work on Ethereum, BSC, and Bitcoin, but their transactions are not indexed — they never
+appear in `GET /transactions` or `GET /transfers/{txHash}`, and no webhooks fire for them.
+
+---
+
+## 10. Pagination
+
+Paginated endpoints: `GET /wallets`, `GET /wallets/{ref}/transactions`, `GET /transactions`. Not
+paginated: `GET /networks`, `GET /webhooks/subscriptions`.
+
+Parameters: `page` (default 1, ≥1) and `limit` (default 20, 1–100). A `limit` above 100 is rejected
+with `400`, not clamped.
+
+Every paginated response includes:
+```json
+{ "pagination": { "page": 1, "limit": 20, "total": 143, "totalPages": 8 } }
+```
+
+`total` counts all rows matching the filters; `totalPages` is `ceil(total / limit)`.
+
+**The rows key differs per endpoint** — `data.wallets`, `data.transactions`, and `data.items`
+respectively. There is no shared convention.
+
+Ordering is by creation time descending, so rows inserted mid-sweep shift later pages; deduplicate on
+a stable identifier when paging through large result sets.
+
+### Transaction shape differences
+
+| Concept | `GET /wallets/{ref}/transactions` | `GET /transactions` and `GET /transfers/{txHash}` |
+|---------|-----------------------------------|---------------------------------------------------|
+| Rows key | `data.transactions` | `data.items` (single object for `/transfers/{txHash}`) |
+| Row ID | `transactionId` | `txId` |
+| Source address | `txFromAddress` | `fromAddress` |
+| Destination address | `txToAddress` | `toAddress` |
+| Wallet context | implied by path | `walletId`, `walletReference`, `walletChain` |
+
+---
+
+## 11. Complete endpoint index
+
+| Method | Path | Scope | Success |
+|--------|------|-------|---------|
+| GET | `/networks` | `read` | 200 |
+| POST | `/wallets` | `read_write` | 201 |
+| GET | `/wallets` | `read` | 200 |
+| GET | `/wallets/{walletReference}` | `read` | 200 |
+| PATCH | `/wallets/{walletReference}` | `read_write` | 200 |
+| GET | `/wallets/{walletReference}/balances` | `read` | 200 |
+| GET | `/wallets/{walletReference}/transactions` | `read` | 200 |
+| POST | `/transfers/quote` | `read` | **201** |
+| POST | `/transfers` | `read_write` | 201 |
+| GET | `/transfers/{txHash}` | `read` | 200 |
+| GET | `/transactions` | `read` | 200 |
+| POST | `/webhooks/subscriptions` | `read_write` | 201 |
+| GET | `/webhooks/subscriptions` | `read` | 200 |
+| DELETE | `/webhooks/subscriptions/{subscriptionId}` | `read_write` | 200 |
+| POST | `/webhooks/subscriptions/{subscriptionId}/rotate-secret` | `read_write` | 200 |
+
+---
+
+## 12. Known limitations
+
+1. **Indexing is Tron-only.** Deposits and withdrawals on Ethereum, BSC, and Bitcoin are not
+   detected; no ledger rows, no webhooks.
+2. **Webhook deliveries are attempted once**, with no retry and a 10-second timeout. Missed events
+   are lost permanently; reconciliation via `GET /transactions` is required.
+3. **Webhook secret rotation has no overlap window.** The old secret dies immediately and the new one
+   is shown exactly once.
+4. **Missing resources return `400`, not `404`**, because existence is validated per field.
+5. **Indexing lags the chain** by at least 3 confirmations plus the 10-second poll interval, so a
+   freshly broadcast transfer is not immediately queryable.
+6. **`GET /wallets?network=` filters on `walletChain`**, so it requires a chain ID
+   (`tron_mainnet`), not a network name (`tron`).
+7. **Rate limits are per IP, not per key**, so all services behind one egress address share 60
+   requests per minute.
+8. **`PATCH /wallets/{ref}` returns a different wallet shape** from every other wallet endpoint.
+9. **`txId` is overloaded** — the on-chain hash in a send response, the internal row ID in a lookup
+   response.
+10. **Webhook payloads carry `walletId`, not `walletReference`**, so attribution requires a stored
+    mapping or address matching.
+
+---
+
+## 13. Quick integration recipe
+
+```javascript
+const BASE = process.env.TRAYCER_BASE_URL;
+const KEY = process.env.TRAYCER_API_KEY;
+
+const call = async (path, { method = "GET", body, idempotencyKey } = {}) => {
+    const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: {
+            "x-api-key": KEY,
+            "Content-Type": "application/json",
+            ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const payload = await res.json();
+    if (!res.ok) {
+        const error = new Error(payload.message);
+        error.code = payload.code ?? res.status;
+        error.validationErrors = payload.validationErrors ?? [];
+        throw error;
+    }
+    return payload.data;
+};
+
+// 1. Provision an address for your user
+const wallet = await call("/wallets", {
+    method: "POST",
+    body: { walletReference: "user_8842", network: "tron" },
+});
+
+// 2. Register a webhook endpoint (once per organization, not per wallet)
+await call("/webhooks/subscriptions", {
+    method: "POST",
+    body: { webhookUrl: "https://yourapp.com/webhooks/traycer", webhookSecret: SECRET },
+});
+
+// 3. Before every payout: quote
+const body = {
+    fromWalletReference: "user_8842",
+    toAddress: "TXk9...",
+    amount: 100,
+    asset: "USDT",
+    network: "tron",
+};
+
+const quote = await call("/transfers/quote", { method: "POST", body });
+if (!quote.isSufficient) throw new Error(quote.reason);
+
+// 4. Send with a persisted idempotency key
+const transfer = await call("/transfers", {
+    method: "POST",
+    body,
+    idempotencyKey: payout.idempotencyKey,
+});
+
+// 5. Reconcile periodically — webhooks are not guaranteed
+const ledger = await call("/transactions?status=confirmed&limit=100");
+```

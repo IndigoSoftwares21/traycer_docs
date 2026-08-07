@@ -1,0 +1,77 @@
+---
+title: "List wallets"
+description: "Paginated list of your organization's wallets, with search and filters."
+openapi: "GET /wallets"
+---
+
+<Note>
+  Requires a `read` scope key.
+</Note>
+
+Returns wallets newest-first under `data.wallets`, with `data.pagination` alongside.
+
+## The network filter takes a chain ID
+
+<Warning>
+  `?network=tron` returns **nothing**. The filter compares against the stored `walletChain`, which includes the environment.
+
+  Pass `tron_mainnet`, `tron_nile`, `ethereum_mainnet`, `ethereum_sepolia`, `bsc_mainnet`, `bsc_testnet`, `bitcoin_mainnet`, or `bitcoin_testnet`.
+</Warning>
+
+Read `walletChain` from any wallet object to see which value your environment uses.
+
+## Filters
+
+| Parameter | Notes |
+| --- | --- |
+| `search` | Case-insensitive partial match on `walletReference` **or** `walletAddress`. Useful for "find the wallet that owns this address". |
+| `network` | Exact match on `walletChain`. See the warning above. |
+| `status` | `active` or `inactive`. |
+| `page` | Default `1`. |
+| `limit` | Default `20`, max `100`. Above 100 is a `400`, not a silent clamp. |
+
+Filters combine with `AND`.
+
+```bash
+curl -G $BASE/wallets \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  --data-urlencode "status=active" \
+  --data-urlencode "network=tron_mainnet" \
+  --data-urlencode "limit=100"
+```
+
+## Paging through everything
+
+```javascript
+const allWallets = async (filters = {}) => {
+    const out = [];
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+        const params = new URLSearchParams({ ...filters, page, limit: 100 });
+        const data = await traycer(`/wallets?${params}`);
+
+        out.push(...data.wallets);
+        totalPages = data.pagination.totalPages;
+        page += 1;
+    }
+
+    return out;
+};
+```
+
+<Tip>
+  Rows are ordered by creation time descending, so wallets created mid-sweep shift later pages. Deduplicate on `walletReference` if that matters.
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Pagination and filtering" icon="list" href="/guides/pagination">
+    Response shapes and safe iteration.
+  </Card>
+  <Card title="Get wallet" icon="magnifying-glass" href="/api-reference/wallets/get-wallet">
+    Fetch one by reference.
+  </Card>
+</CardGroup>

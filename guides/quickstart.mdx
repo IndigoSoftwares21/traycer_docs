@@ -1,0 +1,325 @@
+---
+title: "Quickstart"
+description: "From an empty account to a completed payout in five requests."
+icon: "rocket"
+---
+
+This walkthrough provisions a wallet, subscribes to deposit events, checks the balance, prices a transfer, and sends it. Roughly ten minutes, most of it waiting for a test deposit to land.
+
+<Note>
+  Everything below uses Tron because its fees are small and its blocks are fast, which makes testing cheap. The same five calls work on `bitcoin`, `ethereum`, and `bsc` — swap the `network` value and the address format.
+</Note>
+
+## Before you start
+
+You need an API key with the `read_write` scope. Keys are created in the dashboard and shown **once**, at creation — only a hash is stored, so a key you lose has to be replaced rather than recovered.
+
+```bash Set up your shell
+export TRAYCER_API_KEY="trc_live_a1b2c3d4_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+export BASE="https://your-domain.com/api/v1/http"
+```
+
+<Warning>
+  Anyone holding this key can move funds out of your wallets. Keep it in server-side environment variables — never in a mobile app, a browser bundle, or a committed `.env`.
+</Warning>
+
+## 1. Create a wallet
+
+`walletReference` is your identifier. Use whatever your database already calls this user or order.
+
+<CodeGroup>
+
+```bash cURL
+curl -X POST $BASE/wallets \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "walletReference": "user_8842", "network": "tron" }'
+```
+
+```javascript Node.js
+const res = await fetch(`${BASE}/wallets`, {
+    method: "POST",
+    headers: {
+        "x-api-key": process.env.TRAYCER_API_KEY,
+        "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+        walletReference: "user_8842",
+        network: "tron",
+    }),
+});
+
+const { data } = await res.json();
+console.log(data.walletAddress);
+```
+
+```python Python
+import os, requests
+
+res = requests.post(
+    f"{BASE}/wallets",
+    headers={"x-api-key": os.environ["TRAYCER_API_KEY"]},
+    json={"walletReference": "user_8842", "network": "tron"},
+)
+
+print(res.json()["data"]["walletAddress"])
+```
+
+</CodeGroup>
+
+```json Response — 201
+{
+  "message": "Wallet created successfully",
+  "code": 201,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "network": "tron",
+    "walletStatus": "active",
+    "coins": [ /* assets available on this network */ ],
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+Show `walletAddress` to your user — it is a live receiving address from this moment on. Store nothing else; `user_8842` is all you need to address this wallet from here on.
+
+## 2. Subscribe to events
+
+Rather than polling us, register a URL. Traycer will POST to it when funds move.
+
+```bash
+curl -X POST $BASE/webhooks/subscriptions \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "webhookUrl": "https://yourapp.com/webhooks/traycer",
+    "webhookSecret": "a-long-random-string-you-generated"
+  }'
+```
+
+The secret signs every delivery. You must verify that signature — without it, anyone who discovers your URL can post fake deposits. The [Webhooks guide](/guides/webhooks) has copy-pasteable verification code.
+
+<Tip>
+  Testing locally? Point `webhookUrl` at a tunnel (`ngrok http 3000`, `cloudflared tunnel`) so deliveries reach your machine.
+</Tip>
+
+## 3. Fund the wallet, then check the balance
+
+Send some USDT to the address from step 1, then:
+
+```bash
+curl $BASE/wallets/user_8842/balances -H "x-api-key: $TRAYCER_API_KEY"
+```
+
+```json Response — 200
+{
+  "message": "Balances retrieved successfully",
+  "code": 200,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "balances": { "trx": 42.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+This reads the chain directly rather than a cache, so it is slower than the other endpoints — and always current.
+
+<Warning>
+  Notice the wallet holds **both** TRX and USDT. If `trx` were `0`, the next two steps would fail: the network fee for a USDT transfer is paid in TRX. See [Networks and assets](/guides/networks-and-assets).
+</Warning>
+
+## 4. Quote the transfer
+
+Never skip this. The quote estimates the fee and tells you whether the wallet can cover it.
+
+```bash
+curl -X POST $BASE/transfers/quote \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromWalletReference": "user_8842",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron"
+  }'
+```
+
+```json Response — 201
+{
+  "message": "Transfer quote generated successfully",
+  "code": 201,
+  "data": {
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron",
+    "estimatedFee": 14.785,
+    "feeAsset": "TRX",
+    "isSufficient": true,
+    "reason": null,
+    "currentBalances": { "trx": 42.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+Branch on `isSufficient`. When it is `false`, `reason` says exactly what is missing — usually native currency for gas. Quoting requires only a `read` key, because nothing moves.
+
+## 5. Send
+
+```bash
+curl -X POST $BASE/transfers \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromWalletReference": "user_8842",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron"
+  }'
+```
+
+```json Response — 201
+{
+  "message": "Transfer initiated successfully",
+  "code": 201,
+  "data": {
+    "txId": "3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT"
+  }
+}
+```
+
+`txId` is the on-chain hash. The `Idempotency-Key` header means that if this request times out and you retry with the same key, you get the original response back instead of a second transfer — see [Idempotency](/guides/idempotency).
+
+<Warning>
+  `201` means **broadcast**, not confirmed. The transaction is now on the network and cannot be recalled. Confirmation arrives as a `transaction.withdrawal` webhook, or via [`GET /transfers/{txHash}`](/api-reference/transfers/get-transfer) once it has been indexed.
+</Warning>
+
+## The whole thing, in one file
+
+<CodeGroup>
+
+```javascript payout.js
+const BASE = process.env.TRAYCER_BASE_URL;
+const KEY = process.env.TRAYCER_API_KEY;
+
+const call = async (path, { method = "GET", body, idempotencyKey } = {}) => {
+    const res = await fetch(`${BASE}${path}`, {
+        method,
+        headers: {
+            "x-api-key": KEY,
+            "Content-Type": "application/json",
+            ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const payload = await res.json();
+    if (!res.ok) throw new Error(`${payload.code}: ${payload.message}`);
+    return payload.data;
+};
+
+// 1. Provision
+const wallet = await call("/wallets", {
+    method: "POST",
+    body: { walletReference: "user_8842", network: "tron" },
+});
+
+// 2. Quote
+const quote = await call("/transfers/quote", {
+    method: "POST",
+    body: {
+        fromWalletReference: "user_8842",
+        toAddress: "TXk9YourDestinationAddress0000000000",
+        amount: 100,
+        asset: "USDT",
+        network: "tron",
+    },
+});
+
+if (!quote.isSufficient) throw new Error(quote.reason);
+
+// 3. Send, safely retryable under the same key
+const transfer = await call("/transfers", {
+    method: "POST",
+    idempotencyKey: crypto.randomUUID(),
+    body: {
+        fromWalletReference: "user_8842",
+        toAddress: "TXk9YourDestinationAddress0000000000",
+        amount: 100,
+        asset: "USDT",
+        network: "tron",
+    },
+});
+
+console.log("broadcast", transfer.txId);
+```
+
+```python payout.py
+import os, uuid, requests
+
+BASE = os.environ["TRAYCER_BASE_URL"]
+KEY = os.environ["TRAYCER_API_KEY"]
+
+
+def call(path, method="GET", body=None, idempotency_key=None):
+    headers = {"x-api-key": KEY}
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
+
+    res = requests.request(method, f"{BASE}{path}", headers=headers, json=body)
+    payload = res.json()
+
+    if not res.ok:
+        raise RuntimeError(f"{payload['code']}: {payload['message']}")
+
+    return payload["data"]
+
+
+wallet = call("/wallets", "POST", {"walletReference": "user_8842", "network": "tron"})
+
+body = {
+    "fromWalletReference": "user_8842",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron",
+}
+
+quote = call("/transfers/quote", "POST", body)
+if not quote["isSufficient"]:
+    raise RuntimeError(quote["reason"])
+
+transfer = call("/transfers", "POST", body, idempotency_key=str(uuid.uuid4()))
+print("broadcast", transfer["txId"])
+```
+
+</CodeGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Authentication" icon="key" href="/guides/authentication">
+    Scopes, IP allowlists, expiry, and rotating a key without downtime.
+  </Card>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    Signature verification, the delivery model, and what it does not guarantee.
+  </Card>
+  <Card title="Transfers" icon="paper-plane" href="/guides/transfers">
+    Fee mechanics per chain, and how a transfer becomes a ledger row.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/guides/errors">
+    The response envelope and every status code the API returns.
+  </Card>
+</CardGroup>

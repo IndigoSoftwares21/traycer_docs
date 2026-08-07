@@ -1,0 +1,131 @@
+---
+title: "Rate limits"
+description: "60 requests per minute in production, how to detect the ceiling, and how to stay under it."
+icon: "gauge-high"
+---
+
+Production deployments cap traffic at **60 requests per minute per IP address**. Exceed it and requests are rejected until the window rolls over.
+
+<Note>
+  The limit is applied by IP, not by API key. Every service behind the same egress address shares one budget — a busy background job can rate-limit your user-facing traffic.
+</Note>
+
+Non-production deployments do not enable the limiter, so a local or staging environment will happily absorb bursts that production rejects. Load-test against something that has it switched on.
+
+## What a rejection looks like
+
+<Warning>
+  Rate limit responses come from the HTTP layer, **before** the application, so they do **not** use the standard envelope. Code that assumes `message` and `code` will misread them.
+</Warning>
+
+```json 429
+{
+  "statusCode": 429,
+  "error": "Too Many Requests",
+  "message": "Rate limit exceeded, retry in 1 minute"
+}
+```
+
+Note `statusCode`, not `code`, and the additional `error` field. Detect rate limiting by HTTP status, never by parsing the body.
+
+Rate-limited responses carry standard headers:
+
+| Header | Meaning |
+| --- | --- |
+| `retry-after` | Seconds to wait before the next attempt. |
+| `x-ratelimit-limit` | Requests allowed per window (60). |
+| `x-ratelimit-remaining` | Requests left in the current window. |
+| `x-ratelimit-reset` | Seconds until the window resets. |
+
+`x-ratelimit-remaining` is present on successful responses too, so you can throttle before hitting the wall rather than after.
+
+## Handling it
+
+```javascript
+const withRateLimitRetry = async (fn, { attempts = 4 } = {}) => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        const res = await fn();
+
+        if (res.status !== 429) return res;
+
+        const retryAfter = Number(res.headers.get("retry-after")) || 2 ** attempt;
+        const jitter = Math.random() * 500;
+
+        await new Promise((r) => setTimeout(r, retryAfter * 1000 + jitter));
+    }
+
+    throw new Error("Rate limited after all retries");
+};
+```
+
+Add jitter. Without it, everything you back off simultaneously retries simultaneously, and you rebuild the spike you were trying to smooth out.
+
+<Warning>
+  Do **not** blindly retry a `429` on `POST /transfers` without an `Idempotency-Key`. A rate-limited request was rejected before reaching the application, so nothing was broadcast — but if you cannot tell a `429` from a timeout, you can be wrong about that. Send the key and the question stops mattering. See [Idempotency](/guides/idempotency).
+</Warning>
+
+## Staying under the limit
+
+<AccordionGroup>
+  <Accordion title="Do not poll for deposits" icon="bell">
+    Polling `GET /wallets/{ref}/balances` for a thousand wallets will exhaust the budget in seconds. Register a [webhook](/guides/webhooks) and let deposits come to you.
+  </Accordion>
+
+  <Accordion title="Page with limit=100" icon="list">
+    A sweep of 5,000 transactions is 50 requests at `limit=100`, or 250 at the default `limit=20`. Same data, a fifth of the budget.
+  </Accordion>
+
+  <Accordion title="Cache what does not change" icon="database">
+    `GET /networks` changes when assets are added or disabled — perhaps never during a deployment's lifetime. Fetch it at startup, refresh hourly, and stop asking.
+  </Accordion>
+
+  <Accordion title="Reserve live balance reads" icon="wallet">
+    `GET /wallets/{ref}/balances` hits a blockchain node on every call. It is the slowest endpoint and the most wasteful to loop over. Use it on withdrawal screens and before payouts, not for list views.
+  </Accordion>
+
+  <Accordion title="Serialize your background work" icon="clock">
+    Give batch jobs their own queue with a fixed rate — say 30 requests per minute — leaving headroom for user-facing traffic on the same IP.
+  </Accordion>
+
+  <Accordion title="Separate egress for heavy jobs" icon="network-wired">
+    Because the limit is per IP, running bulk reconciliation from a different egress address gives it an independent budget. Remember to allowlist that address if the key is IP-restricted.
+  </Accordion>
+</AccordionGroup>
+
+## Budgeting a reconciliation sweep
+
+At 60 requests per minute you have roughly 3,600 per hour from one address. A daily reconciliation over 100,000 transactions at `limit=100` is 1,000 requests — under 20 minutes of the budget if it runs alone, and comfortable if you pace it:
+
+```javascript
+const RATE = 30;                  // requests per minute, half the ceiling
+const INTERVAL = 60_000 / RATE;   // 2s between requests
+
+const pacedSweep = async (filters) => {
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+        const started = Date.now();
+        const params = new URLSearchParams({ ...filters, page, limit: 100 });
+        const data = await traycer(`/transactions?${params}`);
+
+        await handleBatch(data.items);
+        totalPages = data.pagination.totalPages;
+        page += 1;
+
+        const elapsed = Date.now() - started;
+        if (elapsed < INTERVAL) await sleep(INTERVAL - elapsed);
+    }
+};
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    The alternative to polling.
+  </Card>
+  <Card title="Pagination" icon="list" href="/guides/pagination">
+    Fewer, larger pages.
+  </Card>
+</CardGroup>

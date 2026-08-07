@@ -1,0 +1,225 @@
+---
+title: "Wallets"
+description: "How addresses are provisioned, what walletReference means, and how status affects money movement."
+icon: "wallet"
+---
+
+A wallet is a keypair on one blockchain, owned by your organization, addressed by an identifier you chose. Traycer generates the keypair, encrypts the private key under a key derived for your organization, and hands you back the public address.
+
+## walletReference is yours
+
+When you create a wallet you supply `walletReference`. It is the only handle you need afterwards — every wallet endpoint takes it in the path or body.
+
+```bash
+POST   /wallets                              → { "walletReference": "user_8842", ... }
+GET    /wallets/user_8842
+PATCH  /wallets/user_8842
+GET    /wallets/user_8842/balances
+GET    /wallets/user_8842/transactions
+POST   /transfers  { "fromWalletReference": "user_8842", ... }
+```
+
+The rules:
+
+<CardGroup cols={2}>
+  <Card title="Character set" icon="font">
+    Letters, digits, underscores, and hyphens only. **No spaces.** Enforced by `^[a-zA-Z0-9_-]+$`.
+  </Card>
+  <Card title="Length" icon="ruler">
+    1–255 characters.
+  </Card>
+  <Card title="Uniqueness" icon="fingerprint">
+    Unique within your organization. Reusing one returns `400`. Another organization may hold the same string — references are scoped to you.
+  </Card>
+  <Card title="Immutability" icon="lock">
+    Cannot be changed after creation. Pick something stable: an internal user ID, not an email address.
+  </Card>
+</CardGroup>
+
+<Tip>
+  A user needing addresses on several chains needs several wallets, and each needs its own reference. A scheme like `user_8842_tron` and `user_8842_eth` keeps them distinct and readable.
+</Tip>
+
+## Creating one
+
+```bash
+curl -X POST $BASE/wallets \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "walletReference": "user_8842", "network": "tron" }'
+```
+
+```json 201
+{
+  "message": "Wallet created successfully",
+  "code": 201,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "network": "tron",
+    "walletStatus": "active",
+    "coins": [
+      {
+        "coinSymbol": "TRX",
+        "coinName": "Tron",
+        "coinContractAddress": null,
+        "coinDecimals": 6,
+        "coinIsNative": true,
+        "displayName": "TRX",
+        "tokenStandard": "Native"
+      },
+      {
+        "coinSymbol": "USDT",
+        "coinName": "Tether USD",
+        "coinContractAddress": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+        "coinDecimals": 6,
+        "coinIsNative": false,
+        "displayName": "USDT (TRC20)",
+        "tokenStandard": "TRC20"
+      }
+    ],
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+`coins` is the list of assets currently active on that network — the same data [`GET /networks`](/api-reference/networks/list-networks) returns, inlined so you can render "this wallet accepts…" without a second call.
+
+<Note>
+  The address is live the instant it is returned. Someone can deposit to it before you have finished writing your own database row, and the deposit will be recorded correctly either way.
+</Note>
+
+### walletChain vs network
+
+Two similar-looking fields that mean different things:
+
+| Field | Example | What it is |
+| --- | --- | --- |
+| `network` | `tron` | The network family. What you pass when creating wallets and sending transfers. |
+| `walletChain` | `tron_mainnet` | The specific chain, including environment. Testnet deployments return `tron_nile`, `ethereum_sepolia`, `bsc_testnet`, `bitcoin_testnet`. |
+
+This matters in one place: the `network` filter on [`GET /wallets`](/api-reference/wallets/list-wallets) matches against the stored `walletChain`, so it wants a chain identifier.
+
+<Warning>
+  `GET /wallets?network=tron` returns **nothing**. Use `GET /wallets?network=tron_mainnet` (or `tron_nile` on testnet). The filter compares against `walletChain`, not the friendly network name.
+</Warning>
+
+## Listing and searching
+
+```bash
+curl "$BASE/wallets?page=1&limit=50&status=active&search=user_" \
+  -H "x-api-key: $TRAYCER_API_KEY"
+```
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `page` | `1` | 1-based. |
+| `limit` | `20` | Max `100`. Above that is a `400`, not a silent clamp. |
+| `search` | — | Case-insensitive partial match on reference **and** address. |
+| `network` | — | Chain identifier, e.g. `tron_mainnet`. |
+| `status` | — | `active` or `inactive`. |
+
+Results come back newest-first under `data.wallets`, with `data.pagination` alongside. See [Pagination](/guides/pagination).
+
+## Status: active and inactive
+
+`PATCH /wallets/{walletReference}` flips a wallet between `active` and `inactive`.
+
+```bash
+curl -X PATCH $BASE/wallets/user_8842 \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "status": "inactive" }'
+```
+
+<Warning>
+  **Deactivating does not stop deposits.** The address still exists on-chain and anyone can still send to it. Incoming funds are still detected, still recorded, and still fire webhooks.
+
+  What changes is that outgoing transfers are refused — `POST /transfers` and `POST /transfers/quote` reject the wallet with `Sender wallet is currently inactive`.
+</Warning>
+
+Deactivation is the right tool for freezing an account under investigation, or retiring a wallet you no longer want paying out. It is not a way to close an address; addresses are permanent.
+
+The `PATCH` response has a different shape from the other wallet endpoints — it returns the stored database record, including `walletId` and `organizationId`, and omits `network` and `coins`:
+
+```json 200
+{
+  "message": "Wallet status updated successfully",
+  "code": 200,
+  "data": {
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "organizationId": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "walletStatus": "inactive",
+    "createdAt": "2026-08-07T14:22:31.000Z"
+  }
+}
+```
+
+## Balances
+
+[`GET /wallets/{walletReference}/balances`](/api-reference/wallets/get-balances) queries the chain at request time. Nothing is cached, which means the number is always current and the call is always slower than a database read — and fails with `500` if the upstream node is unreachable.
+
+```json 200
+{
+  "message": "Balances retrieved successfully",
+  "code": 200,
+  "data": {
+    "walletReference": "user_8842",
+    "walletAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "walletChain": "tron_mainnet",
+    "balances": { "trx": 12.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+The keys inside `balances` depend on the network — `btc` alone for Bitcoin, `eth`/`usdt`/`usdc` for Ethereum, and so on. Read them defensively rather than assuming a fixed shape; [Networks and assets](/guides/networks-and-assets) has the full table.
+
+<Tip>
+  Do not call this on every page load. For a list view, read your own records or [`GET /transactions`](/api-reference/transactions/list-transactions); fetch live balances on the screens that actually need to be exact, like a withdrawal form.
+</Tip>
+
+## Wallet history
+
+[`GET /wallets/{walletReference}/transactions`](/api-reference/wallets/list-wallet-transactions) returns indexed deposits and withdrawals for a single wallet, newest first, filterable by `type` and `status`.
+
+Rows appear under `data.transactions` here, but under `data.items` on the organization-wide [`GET /transactions`](/api-reference/transactions/list-transactions) — and the field names differ between the two. The [Pagination guide](/guides/pagination) lays out both shapes side by side.
+
+## Private keys
+
+You never see one. Traycer generates the keypair, encrypts the private key with a key derived for your organization, and stores only the ciphertext. It is decrypted in memory to sign a transfer and never returned by any endpoint.
+
+The practical consequences:
+
+- **There is no export.** You cannot take a wallet's key elsewhere. Sweep the funds to an address you control instead.
+- **Signing only happens through `POST /transfers`.** That endpoint is the entire surface for moving funds, which is why the `read_write` scope deserves care.
+
+## Errors
+
+| Status | Message | When |
+| --- | --- | --- |
+| `400` | `A wallet with this reference already exists for this organization` | Reference already taken. |
+| `400` | `walletReference must only contain alphanumeric characters, underscores, or hyphens, with no spaces` | Illegal characters. |
+| `400` | `Network not found` | Unknown network name. |
+| `400` | `Network is currently inactive` | Network exists but is disabled. |
+| `400` | `Wallet not found or not owned by organization` | Unknown reference on `GET`/balances. |
+| `400` | `Wallet not found or does not belong to this organization` | Unknown reference on `PATCH`/transactions. |
+| `400` | `Status must be 'active' or 'inactive'` | Bad `status` value on `PATCH`. |
+
+<Note>
+  A wallet that does not exist returns `400` with a validation error, not `404`. Existence is checked during request validation, so it surfaces as a field-level failure. See [Errors](/guides/errors).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Networks and assets" icon="link" href="/guides/networks-and-assets">
+    Which chains, which tokens, and why gas matters.
+  </Card>
+  <Card title="Transfers" icon="paper-plane" href="/guides/transfers">
+    Quote, send, and track money leaving a wallet.
+  </Card>
+</CardGroup>

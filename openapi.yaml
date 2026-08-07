@@ -1,0 +1,2183 @@
+openapi: 3.1.0
+
+info:
+    title: Traycer HTTP API
+    version: "1.0.0"
+    summary: Multi-chain wallet provisioning, live balances, transfers, and webhooks.
+    description: |
+        The Traycer HTTP API lets you provision blockchain wallets for your own users, read
+        live on-chain balances, price and broadcast transfers, and receive webhook events
+        when funds move.
+
+        **Everything is keyed by `walletReference`** — an identifier you choose (your user ID,
+        order ID, account number). You never store Traycer identifiers.
+
+        ### Authentication
+
+        Every request carries an API key in the `x-api-key` header. Keys are scoped `read` or
+        `read_write`. See the [Authentication guide](/guides/authentication).
+
+        ### Response envelope
+
+        Every response — success or failure — uses the same envelope:
+
+        ```json
+        { "message": "Wallets retrieved successfully", "code": 200, "data": { } }
+        ```
+
+        `data` is `null` when an endpoint has nothing to return. Errors omit `data` and may add
+        `validationErrors`. See the [Errors guide](/guides/errors).
+
+        ### Testing in the playground
+
+        Pick a server below, paste your API key into the **Authorization** panel, and send.
+        Requests go to the server you select — the production entry is a placeholder until you
+        substitute your deployed domain.
+    contact:
+        name: Traycer API Support
+        url: https://github.com/IndigoSoftwares21
+    license:
+        name: Proprietary
+
+servers:
+    - url: http://localhost:6969/api/v1/http
+      description: Local development server (default port 6969)
+    - url: https://your-domain.com/api/v1/http
+      description: Production — replace `your-domain.com` with your deployed host
+
+security:
+    - ApiKeyAuth: []
+
+tags:
+    - name: Networks
+      description: Supported chains and the assets available on each.
+    - name: Wallets
+      description: Provision addresses, inspect them, and read live balances.
+    - name: Transfers
+      description: Price a transfer, broadcast it, and look it up afterwards.
+    - name: Transactions
+      description: The organization-wide ledger of deposits and withdrawals.
+    - name: Webhooks
+      description: Manage the endpoints Traycer notifies when funds move.
+
+paths:
+    # ------------------------------------------------------------------ Networks
+    /networks:
+        get:
+            summary: List networks
+            description: |
+                Returns every **active** network together with its active coins. Use it to
+                discover valid `network` and `asset` values instead of hardcoding them, and to
+                read the live token contract addresses for the environment you are pointed at.
+
+                Requires a `read` scope key.
+            operationId: listNetworks
+            tags: [Networks]
+            responses:
+                "200":
+                    description: Networks fetched successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Networks fetched successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: array
+                                        items:
+                                            $ref: "#/components/schemas/Network"
+                            example:
+                                message: Networks fetched successfully
+                                code: 200
+                                data:
+                                    - networkId: 3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30
+                                      networkName: ethereum
+                                      networkIsActive: true
+                                      createdAt: "2026-01-14T09:02:11.000Z"
+                                      coins:
+                                          - coinId: 7a2b1c40-9d3e-4f11-bb02-8c1d2e3f4a5b
+                                            networkId: 3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30
+                                            coinSymbol: ETH
+                                            coinName: Ethereum
+                                            coinContractAddress: null
+                                            coinDecimals: 18
+                                            coinIsNative: true
+                                            coinIsActive: true
+                                            displayName: ETH
+                                            tokenStandard: Native
+                                          - coinId: 91d4e5f6-1a2b-4c3d-8e9f-0a1b2c3d4e5f
+                                            networkId: 3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30
+                                            coinSymbol: USDT
+                                            coinName: Tether USD
+                                            coinContractAddress: "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+                                            coinDecimals: 6
+                                            coinIsNative: false
+                                            coinIsActive: true
+                                            displayName: USDT (ERC20)
+                                            tokenStandard: ERC20
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    # ------------------------------------------------------------------- Wallets
+    /wallets:
+        post:
+            summary: Create wallet
+            description: |
+                Generates a fresh keypair on the requested network, encrypts the private key
+                under your organization's key, and returns the receiving address.
+
+                The address is live the moment it is returned — anyone can send funds to it,
+                whether or not you have called any other endpoint.
+
+                Requires a `read_write` scope key.
+            operationId: createWallet
+            tags: [Wallets]
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            required: [walletReference, network]
+                            properties:
+                                walletReference:
+                                    type: string
+                                    minLength: 1
+                                    maxLength: 255
+                                    pattern: "^[a-zA-Z0-9_-]+$"
+                                    description: |
+                                        Your own identifier for this wallet. Letters, digits,
+                                        underscores and hyphens only — no spaces. Must be unique
+                                        within your organization.
+                                    example: user_8842
+                                network:
+                                    type: string
+                                    enum: [bitcoin, ethereum, bsc, tron]
+                                    description: Network to provision the address on. Must be active.
+                                    example: tron
+                        examples:
+                            tron:
+                                summary: Tron wallet
+                                value:
+                                    walletReference: user_8842
+                                    network: tron
+                            ethereum:
+                                summary: Ethereum wallet
+                                value:
+                                    walletReference: order_10023
+                                    network: ethereum
+            responses:
+                "201":
+                    description: Wallet created successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Wallet created successfully
+                                    code:
+                                        type: integer
+                                        example: 201
+                                    data:
+                                        $ref: "#/components/schemas/Wallet"
+                            example:
+                                message: Wallet created successfully
+                                code: 201
+                                data:
+                                    walletReference: user_8842
+                                    walletAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                    walletChain: tron_mainnet
+                                    network: tron
+                                    walletStatus: active
+                                    createdAt: "2026-08-07T14:22:31.000Z"
+                                    coins:
+                                        - coinId: c1a2b3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                                          networkId: 5b2e7c81-3a4d-4e5f-9a0b-1c2d3e4f5a6b
+                                          coinSymbol: TRX
+                                          coinName: Tron
+                                          coinContractAddress: null
+                                          coinDecimals: 6
+                                          coinIsNative: true
+                                          coinIsActive: true
+                                          displayName: TRX
+                                          tokenStandard: Native
+                                        - coinId: d2b3c4e5-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+                                          networkId: 5b2e7c81-3a4d-4e5f-9a0b-1c2d3e4f5a6b
+                                          coinSymbol: USDT
+                                          coinName: Tether USD
+                                          coinContractAddress: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+                                          coinDecimals: 6
+                                          coinIsNative: false
+                                          coinIsActive: true
+                                          displayName: USDT (TRC20)
+                                          tokenStandard: TRC20
+                "400":
+                    description: Validation failed — duplicate reference, bad characters, or unknown/inactive network.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            examples:
+                                duplicateReference:
+                                    summary: Reference already used
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [walletReference]
+                                              message: A wallet with this reference already exists for this organization
+                                badCharacters:
+                                    summary: Illegal characters in reference
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [walletReference]
+                                              message: walletReference must only contain alphanumeric characters, underscores, or hyphens, with no spaces
+                                unknownNetwork:
+                                    summary: Unknown network
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [network]
+                                              message: Network not found
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+        get:
+            summary: List wallets
+            description: |
+                Paginated list of the wallets in your organization, newest first.
+
+                Requires a `read` scope key.
+            operationId: listWallets
+            tags: [Wallets]
+            parameters:
+                - $ref: "#/components/parameters/PageParam"
+                - $ref: "#/components/parameters/LimitParam"
+                - name: search
+                  in: query
+                  required: false
+                  description: Case-insensitive partial match against wallet reference **and** wallet address.
+                  schema:
+                      type: string
+                      maxLength: 255
+                  example: user_
+                - name: network
+                  in: query
+                  required: false
+                  description: |
+                      Filters on the stored chain identifier, so pass a **chain ID** such as
+                      `tron_mainnet` or `ethereum_sepolia` — not the short network name.
+                      See `walletChain` on any wallet object.
+                  schema:
+                      type: string
+                      maxLength: 100
+                      enum:
+                          - tron_mainnet
+                          - tron_nile
+                          - ethereum_mainnet
+                          - ethereum_sepolia
+                          - bsc_mainnet
+                          - bsc_testnet
+                          - bitcoin_mainnet
+                          - bitcoin_testnet
+                  example: tron_mainnet
+                - name: status
+                  in: query
+                  required: false
+                  schema:
+                      type: string
+                      enum: [active, inactive]
+                  example: active
+            responses:
+                "200":
+                    description: Wallets retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Wallets retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        required: [wallets, pagination]
+                                        properties:
+                                            wallets:
+                                                type: array
+                                                items:
+                                                    $ref: "#/components/schemas/Wallet"
+                                            pagination:
+                                                $ref: "#/components/schemas/Pagination"
+                            example:
+                                message: Wallets retrieved successfully
+                                code: 200
+                                data:
+                                    wallets:
+                                        - walletReference: user_8842
+                                          walletAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                          walletChain: tron_mainnet
+                                          network: tron
+                                          walletStatus: active
+                                          createdAt: "2026-08-07T14:22:31.000Z"
+                                          coins: []
+                                    pagination:
+                                        page: 1
+                                        limit: 20
+                                        total: 143
+                                        totalPages: 8
+                "400":
+                    $ref: "#/components/responses/ValidationError"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /wallets/{walletReference}:
+        get:
+            summary: Get wallet
+            description: |
+                Fetches a single wallet by the reference you assigned it. Reads from the
+                database only — for on-chain balances call
+                [Get balances](/api-reference/wallets/get-balances).
+
+                Requires a `read` scope key.
+            operationId: getWallet
+            tags: [Wallets]
+            parameters:
+                - $ref: "#/components/parameters/WalletReferenceParam"
+            responses:
+                "200":
+                    description: Wallet details fetched successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Wallet details fetched successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        $ref: "#/components/schemas/Wallet"
+                            example:
+                                message: Wallet details fetched successfully
+                                code: 200
+                                data:
+                                    walletReference: user_8842
+                                    walletAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                    walletChain: tron_mainnet
+                                    network: tron
+                                    walletStatus: active
+                                    createdAt: "2026-08-07T14:22:31.000Z"
+                                    coins: []
+                "400":
+                    description: |
+                        The wallet does not exist, or belongs to another organization. Both cases
+                        return the same validation error — the API never reveals whether a
+                        reference exists elsewhere.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [walletReference]
+                                      message: Wallet not found or not owned by organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+        patch:
+            summary: Update wallet status
+            description: |
+                Activates or deactivates a wallet.
+
+                Deactivating blocks **outgoing** transfers from this wallet through the API. It
+                does not close the address — deposits still arrive on-chain and are still
+                recorded.
+
+                Requires a `read_write` scope key.
+            operationId: updateWallet
+            tags: [Wallets]
+            parameters:
+                - $ref: "#/components/parameters/WalletReferenceParam"
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            required: [status]
+                            properties:
+                                status:
+                                    type: string
+                                    enum: [active, inactive]
+                                    example: inactive
+                        examples:
+                            deactivate:
+                                summary: Freeze outgoing transfers
+                                value:
+                                    status: inactive
+                            reactivate:
+                                summary: Re-enable transfers
+                                value:
+                                    status: active
+            responses:
+                "200":
+                    description: Wallet status updated successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Wallet status updated successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        $ref: "#/components/schemas/WalletRecord"
+                            example:
+                                message: Wallet status updated successfully
+                                code: 200
+                                data:
+                                    walletId: 1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b
+                                    organizationId: 9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d
+                                    walletReference: user_8842
+                                    walletAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                    walletChain: tron_mainnet
+                                    walletStatus: inactive
+                                    createdAt: "2026-08-07T14:22:31.000Z"
+                "400":
+                    description: Unknown wallet, or a status other than `active`/`inactive`.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            examples:
+                                unknownWallet:
+                                    summary: Unknown wallet
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [walletReference]
+                                              message: Wallet not found or does not belong to this organization
+                                badStatus:
+                                    summary: Invalid status value
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [status]
+                                              message: Status must be 'active' or 'inactive'
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /wallets/{walletReference}/balances:
+        get:
+            summary: Get balances
+            description: |
+                Reads balances **live from the chain** at request time — nothing is cached.
+                Expect this call to be noticeably slower than the database-backed endpoints, and
+                to fail if the upstream node is unavailable.
+
+                The keys inside `balances` depend on the wallet's network:
+
+                | Network  | Keys |
+                | -------- | ---- |
+                | bitcoin  | `btc` |
+                | ethereum | `eth`, `usdt`, `usdc` |
+                | bsc      | `bnb`, `usdt`, `usdc` |
+                | tron     | `trx`, `usdt`, `usdc` |
+
+                Requires a `read` scope key.
+            operationId: getWalletBalances
+            tags: [Wallets]
+            parameters:
+                - $ref: "#/components/parameters/WalletReferenceParam"
+            responses:
+                "200":
+                    description: Balances retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Balances retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        required: [walletReference, walletAddress, walletChain, balances]
+                                        properties:
+                                            walletReference:
+                                                type: string
+                                                example: user_8842
+                                            walletAddress:
+                                                type: string
+                                                example: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                            walletChain:
+                                                $ref: "#/components/schemas/ChainId"
+                                            balances:
+                                                $ref: "#/components/schemas/Balances"
+                            examples:
+                                tron:
+                                    summary: Tron wallet
+                                    value:
+                                        message: Balances retrieved successfully
+                                        code: 200
+                                        data:
+                                            walletReference: user_8842
+                                            walletAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                            walletChain: tron_mainnet
+                                            balances:
+                                                trx: 12.5
+                                                usdt: 430.25
+                                                usdc: 0
+                                bitcoin:
+                                    summary: Bitcoin wallet
+                                    value:
+                                        message: Balances retrieved successfully
+                                        code: 200
+                                        data:
+                                            walletReference: treasury_cold
+                                            walletAddress: bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq
+                                            walletChain: bitcoin_mainnet
+                                            balances:
+                                                btc: 0.04213
+                "400":
+                    description: Unknown wallet reference.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [walletReference]
+                                      message: Wallet not found or not owned by organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /wallets/{walletReference}/transactions:
+        get:
+            summary: List wallet transactions
+            description: |
+                Indexed deposits and withdrawals for one wallet, newest first.
+
+                Rows appear here once the background poller has seen the transaction on-chain,
+                which is not instantaneous after a broadcast. See the
+                [Transfers guide](/guides/transfers) for the timing model.
+
+                Requires a `read` scope key.
+            operationId: listWalletTransactions
+            tags: [Wallets]
+            parameters:
+                - $ref: "#/components/parameters/WalletReferenceParam"
+                - $ref: "#/components/parameters/PageParam"
+                - $ref: "#/components/parameters/LimitParam"
+                - $ref: "#/components/parameters/TxTypeParam"
+                - $ref: "#/components/parameters/TxStatusParam"
+            responses:
+                "200":
+                    description: Wallet transactions retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Wallet transactions retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        required: [transactions, pagination]
+                                        properties:
+                                            transactions:
+                                                type: array
+                                                items:
+                                                    $ref: "#/components/schemas/WalletTransaction"
+                                            pagination:
+                                                $ref: "#/components/schemas/Pagination"
+                            example:
+                                message: Wallet transactions retrieved successfully
+                                code: 200
+                                data:
+                                    transactions:
+                                        - transactionId: 9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01
+                                          txHash: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                                          txFromAddress: TXk9YourCounterpartyAddress00000000
+                                          txToAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                          txAmount: 100
+                                          txAsset: USDT
+                                          txType: deposit
+                                          txStatus: confirmed
+                                          blockNumber: 61234567
+                                          createdAt: "2026-08-07T14:31:02.000Z"
+                                    pagination:
+                                        page: 1
+                                        limit: 20
+                                        total: 1
+                                        totalPages: 1
+                "400":
+                    description: Unknown wallet reference, or an invalid filter value.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [walletReference]
+                                      message: Wallet not found or does not belong to this organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    # ----------------------------------------------------------------- Transfers
+    /transfers/quote:
+        post:
+            summary: Quote a transfer
+            description: |
+                Prices a transfer without moving anything: estimates the network fee, compares it
+                against the wallet's live balances, and reports whether the transfer would
+                succeed.
+
+                Always quote before sending. Token transfers are paid for in the chain's native
+                currency, so a wallet holding only USDT cannot send USDT — `isSufficient` is how
+                you find that out before broadcasting.
+
+                This is a `POST` because it takes a body, but it is a read-only operation, so a
+                `read` scope key is enough.
+            operationId: quoteTransfer
+            tags: [Transfers]
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/TransferRequest"
+                        examples:
+                            token:
+                                summary: 100 USDT on Tron
+                                value:
+                                    fromWalletReference: user_8842
+                                    toAddress: TXk9YourDestinationAddress0000000000
+                                    amount: 100
+                                    asset: USDT
+                                    network: tron
+                            native:
+                                summary: 0.25 ETH on Ethereum
+                                value:
+                                    fromWalletReference: order_10023
+                                    toAddress: "0x742d35Cc6634C0532925a3b844Bc454e4438f44e"
+                                    amount: 0.25
+                                    asset: ETH
+                                    network: ethereum
+            responses:
+                "201":
+                    description: |
+                        Quote generated successfully. Note the status is `201`, not `200`, even
+                        though nothing was created.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Transfer quote generated successfully
+                                    code:
+                                        type: integer
+                                        example: 201
+                                    data:
+                                        $ref: "#/components/schemas/TransferQuote"
+                            examples:
+                                sufficient:
+                                    summary: Wallet can cover it
+                                    value:
+                                        message: Transfer quote generated successfully
+                                        code: 201
+                                        data:
+                                            fromAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                            toAddress: TXk9YourDestinationAddress0000000000
+                                            amount: 100
+                                            asset: USDT
+                                            network: tron
+                                            estimatedFee: 14.785
+                                            feeAsset: TRX
+                                            isSufficient: true
+                                            reason: null
+                                            currentBalances:
+                                                trx: 42.5
+                                                usdt: 430.25
+                                                usdc: 0
+                                insufficientGas:
+                                    summary: Token balance fine, no gas
+                                    value:
+                                        message: Transfer quote generated successfully
+                                        code: 201
+                                        data:
+                                            fromAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                            toAddress: TXk9YourDestinationAddress0000000000
+                                            amount: 100
+                                            asset: USDT
+                                            network: tron
+                                            estimatedFee: 14.785
+                                            feeAsset: TRX
+                                            isSufficient: false
+                                            reason: Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.
+                                            currentBalances:
+                                                trx: 0
+                                                usdt: 430.25
+                                                usdc: 0
+                "400":
+                    description: Validation failed — bad address, unsupported asset, inactive wallet or network.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            examples:
+                                badAddress:
+                                    summary: Address invalid for the network
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [toAddress]
+                                              message: Recipient address is not a valid address for this network
+                                unsupportedAsset:
+                                    summary: Asset not on that network
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [asset]
+                                              message: Asset USDC is not supported on network bitcoin
+                                inactiveWallet:
+                                    summary: Sender deactivated
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [fromWalletReference]
+                                              message: Sender wallet is currently inactive
+                                badAmount:
+                                    summary: Non-positive amount
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [amount]
+                                              message: Amount must be a positive number
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /transfers:
+        post:
+            summary: Send a transfer
+            description: |
+                Signs and broadcasts a transaction from one of your wallets. Same body as
+                [Quote a transfer](/api-reference/transfers/quote-transfer).
+
+                Before broadcasting, the API re-runs the quote and refuses the request if the
+                wallet cannot cover the amount plus fees. A `201` means the transaction was
+                **accepted by the network**, not that it is confirmed — and blockchain transfers
+                cannot be reversed.
+
+                Send an `Idempotency-Key` header so a timeout or retry cannot broadcast twice.
+                See the [Idempotency guide](/guides/idempotency).
+
+                Requires a `read_write` scope key.
+            operationId: sendTransfer
+            tags: [Transfers]
+            parameters:
+                - $ref: "#/components/parameters/IdempotencyKeyHeader"
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/TransferRequest"
+                        examples:
+                            token:
+                                summary: 100 USDT on Tron
+                                value:
+                                    fromWalletReference: user_8842
+                                    toAddress: TXk9YourDestinationAddress0000000000
+                                    amount: 100
+                                    asset: USDT
+                                    network: tron
+            responses:
+                "201":
+                    description: Transfer broadcast to the network.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Transfer initiated successfully
+                                    code:
+                                        type: integer
+                                        example: 201
+                                    data:
+                                        $ref: "#/components/schemas/TransferResult"
+                            example:
+                                message: Transfer initiated successfully
+                                code: 201
+                                data:
+                                    txId: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                                    fromAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                    toAddress: TXk9YourDestinationAddress0000000000
+                                    amount: 100
+                                    asset: USDT
+                "400":
+                    description: |
+                        Rejected before broadcasting. Validation failures carry
+                        `validationErrors`; a funds check that fails at send time returns a plain
+                        message instead.
+                    content:
+                        application/json:
+                            schema:
+                                oneOf:
+                                    - $ref: "#/components/schemas/ValidationErrorResponse"
+                                    - $ref: "#/components/schemas/ErrorResponse"
+                            examples:
+                                insufficientFunds:
+                                    summary: Balance check failed at send time
+                                    value:
+                                        message: Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.
+                                        code: 400
+                                inactiveWallet:
+                                    summary: Sender deactivated
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [fromWalletReference]
+                                              message: Sender wallet is currently inactive
+                                badAddress:
+                                    summary: Address invalid for the network
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [toAddress]
+                                              message: Recipient address is not a valid address for this network
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "409":
+                    description: An earlier request with the same `Idempotency-Key` is still running.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ErrorResponse"
+                            example:
+                                message: A request with this Idempotency-Key is still in progress
+                                code: 409
+                "422":
+                    description: The `Idempotency-Key` was already used with a different payload.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ErrorResponse"
+                            example:
+                                message: This Idempotency-Key was already used with a different request payload
+                                code: 422
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /transfers/{txHash}:
+        get:
+            summary: Get transfer
+            description: |
+                Looks up one indexed transaction by its on-chain hash, scoped to your
+                organization.
+
+                A hash returned by [Send a transfer](/api-reference/transfers/send-transfer) is
+                not queryable here until the poller has indexed the containing block. Until then
+                this endpoint returns `400`.
+
+                Requires a `read` scope key.
+            operationId: getTransfer
+            tags: [Transfers]
+            parameters:
+                - name: txHash
+                  in: path
+                  required: true
+                  description: On-chain transaction hash.
+                  schema:
+                      type: string
+                      minLength: 1
+                      maxLength: 100
+                  example: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+            responses:
+                "200":
+                    description: Transaction details retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Transaction details retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        $ref: "#/components/schemas/LedgerTransaction"
+                            example:
+                                message: Transaction details retrieved successfully
+                                code: 200
+                                data:
+                                    txId: 9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01
+                                    txHash: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                                    walletId: 1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b
+                                    walletReference: user_8842
+                                    walletChain: tron_mainnet
+                                    fromAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                    toAddress: TXk9YourDestinationAddress0000000000
+                                    txAmount: 100
+                                    txAsset: USDT
+                                    txType: withdrawal
+                                    txStatus: confirmed
+                                    blockNumber: 61234599
+                                    createdAt: "2026-08-07T14:35:10.000Z"
+                "400":
+                    description: No indexed transaction with that hash belongs to your organization.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [txHash]
+                                      message: Transaction not found or does not belong to this organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    # -------------------------------------------------------------- Transactions
+    /transactions:
+        get:
+            summary: List transactions
+            description: |
+                Every indexed transaction across every wallet in your organization, newest first.
+                This is the endpoint to reconcile against — webhooks are delivered once with no
+                retry, so anything financially important should be confirmed here.
+
+                Note the rows come back under `data.items`, not `data.transactions`.
+
+                Requires a `read` scope key.
+            operationId: listTransactions
+            tags: [Transactions]
+            parameters:
+                - $ref: "#/components/parameters/PageParam"
+                - $ref: "#/components/parameters/LimitParam"
+                - name: walletReference
+                  in: query
+                  required: false
+                  description: Restrict to one wallet. Must be a reference your organization owns.
+                  schema:
+                      type: string
+                      minLength: 1
+                      maxLength: 255
+                  example: user_8842
+                - $ref: "#/components/parameters/TxTypeParam"
+                - $ref: "#/components/parameters/TxStatusParam"
+                - name: asset
+                  in: query
+                  required: false
+                  description: Exact asset symbol match.
+                  schema:
+                      type: string
+                      maxLength: 50
+                  example: USDT
+                - name: search
+                  in: query
+                  required: false
+                  description: Case-insensitive partial match against transaction hash, source address, and destination address.
+                  schema:
+                      type: string
+                      maxLength: 255
+                  example: 3f8a91
+            responses:
+                "200":
+                    description: Transactions retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Transactions retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        required: [items, pagination]
+                                        properties:
+                                            items:
+                                                type: array
+                                                items:
+                                                    $ref: "#/components/schemas/LedgerTransaction"
+                                            pagination:
+                                                $ref: "#/components/schemas/Pagination"
+                            example:
+                                message: Transactions retrieved successfully
+                                code: 200
+                                data:
+                                    items:
+                                        - txId: 9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01
+                                          txHash: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                                          walletId: 1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b
+                                          walletReference: user_8842
+                                          walletChain: tron_mainnet
+                                          fromAddress: TXk9YourCounterpartyAddress00000000
+                                          toAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                          txAmount: 100
+                                          txAsset: USDT
+                                          txType: deposit
+                                          txStatus: confirmed
+                                          blockNumber: 61234567
+                                          createdAt: "2026-08-07T14:31:02.000Z"
+                                    pagination:
+                                        total: 143
+                                        page: 1
+                                        limit: 20
+                                        totalPages: 8
+                "400":
+                    description: Invalid filter value, or a `walletReference` your organization does not own.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [walletReference]
+                                      message: Wallet not found or does not belong to this organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    # ------------------------------------------------------------------ Webhooks
+    /webhooks/subscriptions:
+        post:
+            summary: Create subscription
+            description: |
+                Registers a URL to receive `transaction.deposit` and `transaction.withdrawal`
+                events. One subscription per URL per organization; every active subscription
+                receives every event.
+
+                The secret you supply signs each delivery — see
+                [Webhooks](/guides/webhooks) for verification code.
+
+                Requires a `read_write` scope key.
+            operationId: createWebhookSubscription
+            tags: [Webhooks]
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            type: object
+                            required: [webhookUrl, webhookSecret]
+                            properties:
+                                webhookUrl:
+                                    type: string
+                                    format: uri
+                                    description: HTTPS endpoint that will receive event deliveries.
+                                    example: https://yourapp.com/webhooks/traycer
+                                webhookSecret:
+                                    type: string
+                                    minLength: 8
+                                    maxLength: 255
+                                    description: Signing secret. Use a long random string, not a guessable phrase.
+                                    example: 4f2a8b1c9d3e5f7a0b2c4d6e8f1a3b5c
+                        examples:
+                            default:
+                                summary: Register an endpoint
+                                value:
+                                    webhookUrl: https://yourapp.com/webhooks/traycer
+                                    webhookSecret: 4f2a8b1c9d3e5f7a0b2c4d6e8f1a3b5c
+            responses:
+                "201":
+                    description: Webhook subscription created successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Webhook subscription created successfully
+                                    code:
+                                        type: integer
+                                        example: 201
+                                    data:
+                                        $ref: "#/components/schemas/WebhookSubscription"
+                            example:
+                                message: Webhook subscription created successfully
+                                code: 201
+                                data:
+                                    subscriptionId: b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e
+                                    webhookUrl: https://yourapp.com/webhooks/traycer
+                                    webhookIsActive: true
+                                    createdAt: "2026-08-07T14:40:00.000Z"
+                "400":
+                    description: Duplicate URL, malformed URL, or a secret shorter than 8 characters.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            examples:
+                                duplicate:
+                                    summary: URL already registered
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [webhookUrl]
+                                              message: A webhook subscription for this URL already exists
+                                shortSecret:
+                                    summary: Secret too short
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [webhookSecret]
+                                              message: Signing secret must be at least 8 characters long
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+        get:
+            summary: List subscriptions
+            description: |
+                All webhook subscriptions for your organization, newest first. Not paginated and
+                takes no parameters. Signing secrets are never returned.
+
+                Requires a `read` scope key.
+            operationId: listWebhookSubscriptions
+            tags: [Webhooks]
+            responses:
+                "200":
+                    description: Webhook subscriptions retrieved successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Webhook subscriptions retrieved successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        required: [subscriptions]
+                                        properties:
+                                            subscriptions:
+                                                type: array
+                                                items:
+                                                    $ref: "#/components/schemas/WebhookSubscription"
+                            example:
+                                message: Webhook subscriptions retrieved successfully
+                                code: 200
+                                data:
+                                    subscriptions:
+                                        - subscriptionId: b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e
+                                          webhookUrl: https://yourapp.com/webhooks/traycer
+                                          webhookIsActive: true
+                                          createdAt: "2026-08-07T14:40:00.000Z"
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/Forbidden"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /webhooks/subscriptions/{subscriptionId}:
+        delete:
+            summary: Delete subscription
+            description: |
+                Permanently removes a subscription. Deliveries to that URL stop immediately;
+                past delivery logs are retained.
+
+                Requires a `read_write` scope key.
+            operationId: deleteWebhookSubscription
+            tags: [Webhooks]
+            parameters:
+                - $ref: "#/components/parameters/SubscriptionIdParam"
+            responses:
+                "200":
+                    description: Webhook subscription deleted successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Webhook subscription deleted successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        properties:
+                                            subscriptionId:
+                                                type: string
+                                                format: uuid
+                                            webhookUrl:
+                                                type: string
+                                                format: uri
+                            example:
+                                message: Webhook subscription deleted successfully
+                                code: 200
+                                data:
+                                    subscriptionId: b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e
+                                    webhookUrl: https://yourapp.com/webhooks/traycer
+                "400":
+                    description: Not a UUID, or no such subscription in your organization.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            examples:
+                                notUuid:
+                                    summary: Malformed identifier
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [subscriptionId]
+                                              message: subscriptionId must be a valid UUID
+                                notFound:
+                                    summary: Unknown subscription
+                                    value:
+                                        message: Validation failed
+                                        code: 400
+                                        validationErrors:
+                                            - path: [subscriptionId]
+                                              message: Webhook subscription not found or does not belong to this organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+    /webhooks/subscriptions/{subscriptionId}/rotate-secret:
+        post:
+            summary: Rotate signing secret
+            description: |
+                Issues a new signing secret and returns it. **This response is the only place the
+                new secret is ever shown.**
+
+                The previous secret stops working the instant this returns — there is no overlap
+                window — so deploy the new one immediately or your signature checks will start
+                failing.
+
+                Takes no request body. Requires a `read_write` scope key.
+            operationId: rotateWebhookSecret
+            tags: [Webhooks]
+            parameters:
+                - $ref: "#/components/parameters/SubscriptionIdParam"
+            responses:
+                "200":
+                    description: Webhook signing secret rotated successfully.
+                    content:
+                        application/json:
+                            schema:
+                                type: object
+                                required: [message, code, data]
+                                properties:
+                                    message:
+                                        type: string
+                                        example: Webhook signing secret rotated successfully
+                                    code:
+                                        type: integer
+                                        example: 200
+                                    data:
+                                        type: object
+                                        properties:
+                                            subscriptionId:
+                                                type: string
+                                                format: uuid
+                                            webhookUrl:
+                                                type: string
+                                                format: uri
+                                            webhookSecret:
+                                                type: string
+                                                description: The new signing secret, prefixed `whsec_`. Shown once.
+                            example:
+                                message: Webhook signing secret rotated successfully
+                                code: 200
+                                data:
+                                    subscriptionId: b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e
+                                    webhookUrl: https://yourapp.com/webhooks/traycer
+                                    webhookSecret: whsec_4f2a8b1c9d3e5f7a0b2c4d6e8f1a3b5c
+                "400":
+                    description: Not a UUID, or no such subscription in your organization.
+                    content:
+                        application/json:
+                            schema:
+                                $ref: "#/components/schemas/ValidationErrorResponse"
+                            example:
+                                message: Validation failed
+                                code: 400
+                                validationErrors:
+                                    - path: [subscriptionId]
+                                      message: Webhook subscription not found or does not belong to this organization
+                "401":
+                    $ref: "#/components/responses/Unauthorized"
+                "403":
+                    $ref: "#/components/responses/ForbiddenReadOnly"
+                "429":
+                    $ref: "#/components/responses/TooManyRequests"
+                "500":
+                    $ref: "#/components/responses/InternalServerError"
+
+# ---------------------------------------------------------------------- Webhooks
+webhooks:
+    transactionDeposit:
+        post:
+            summary: transaction.deposit
+            description: |
+                Sent when the poller indexes an incoming transfer to one of your wallets.
+                Signed with `X-Traycer-Signature: sha256=<hmac>` over the raw request body.
+                Respond `2xx` within 10 seconds; there is no retry.
+            operationId: onTransactionDeposit
+            tags: [Webhooks]
+            parameters:
+                - name: X-Traycer-Signature
+                  in: header
+                  required: true
+                  description: "`sha256=` followed by the hex HMAC-SHA256 of the raw body, keyed with your webhook secret."
+                  schema:
+                      type: string
+                  example: sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/WebhookEvent"
+                        example:
+                            event: transaction.deposit
+                            timestamp: "2026-08-07T14:31:02.000Z"
+                            data:
+                                transactionId: 9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01
+                                organizationId: 9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d
+                                walletId: 1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b
+                                txHash: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                                txFromAddress: TXk9YourCounterpartyAddress00000000
+                                txToAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                txAmount: 100
+                                txAsset: USDT
+                                txType: deposit
+                                txStatus: confirmed
+                                blockNumber: 61234567
+                                createdAt: "2026-08-07T14:31:02.000Z"
+            responses:
+                "200":
+                    description: Acknowledged. Any `2xx` counts as success; anything else is logged as a failed delivery and not retried.
+
+    transactionWithdrawal:
+        post:
+            summary: transaction.withdrawal
+            description: |
+                Sent when the poller indexes an outgoing transfer from one of your wallets —
+                including transfers you broadcast through `POST /transfers`. Identical envelope
+                to `transaction.deposit`, with `txType` set to `withdrawal`.
+            operationId: onTransactionWithdrawal
+            tags: [Webhooks]
+            parameters:
+                - name: X-Traycer-Signature
+                  in: header
+                  required: true
+                  description: "`sha256=` followed by the hex HMAC-SHA256 of the raw body, keyed with your webhook secret."
+                  schema:
+                      type: string
+            requestBody:
+                required: true
+                content:
+                    application/json:
+                        schema:
+                            $ref: "#/components/schemas/WebhookEvent"
+                        example:
+                            event: transaction.withdrawal
+                            timestamp: "2026-08-07T14:35:10.000Z"
+                            data:
+                                transactionId: 4d5e6f70-1a2b-4c3d-8e9f-0a1b2c3d4e5f
+                                organizationId: 9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d
+                                walletId: 1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b
+                                txHash: 8b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c
+                                txFromAddress: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                                txToAddress: TXk9YourDestinationAddress0000000000
+                                txAmount: 100
+                                txAsset: USDT
+                                txType: withdrawal
+                                txStatus: confirmed
+                                blockNumber: 61234599
+                                createdAt: "2026-08-07T14:35:10.000Z"
+            responses:
+                "200":
+                    description: Acknowledged.
+
+# -------------------------------------------------------------------- Components
+components:
+    securitySchemes:
+        ApiKeyAuth:
+            type: apiKey
+            in: header
+            name: x-api-key
+            description: |
+                Your organization's API key, in the form `trc_live_<prefix>_<secret>`. Created in
+                the dashboard and shown once — only a hash is stored, so a lost key cannot be
+                recovered, only replaced.
+
+    parameters:
+        PageParam:
+            name: page
+            in: query
+            required: false
+            description: 1-based page number.
+            schema:
+                type: integer
+                minimum: 1
+                default: 1
+            example: 1
+
+        LimitParam:
+            name: limit
+            in: query
+            required: false
+            description: Rows per page. Values above 100 are rejected, not clamped.
+            schema:
+                type: integer
+                minimum: 1
+                maximum: 100
+                default: 20
+            example: 20
+
+        WalletReferenceParam:
+            name: walletReference
+            in: path
+            required: true
+            description: The identifier you assigned when creating the wallet.
+            schema:
+                type: string
+                minLength: 1
+                maxLength: 255
+            example: user_8842
+
+        SubscriptionIdParam:
+            name: subscriptionId
+            in: path
+            required: true
+            description: UUID of the subscription, from the create or list response.
+            schema:
+                type: string
+                format: uuid
+            example: b7d1c3e5-9a2f-4b6d-8c1e-3f5a7b9d0c2e
+
+        TxTypeParam:
+            name: type
+            in: query
+            required: false
+            description: Restrict to incoming or outgoing transactions.
+            schema:
+                type: string
+                enum: [deposit, withdrawal]
+            example: deposit
+
+        TxStatusParam:
+            name: status
+            in: query
+            required: false
+            description: Restrict by indexing status.
+            schema:
+                type: string
+                enum: [pending, confirmed, failed]
+            example: confirmed
+
+        IdempotencyKeyHeader:
+            name: Idempotency-Key
+            in: header
+            required: false
+            description: |
+                Unique string identifying this logical transfer — a UUID works well. Reuse the
+                same value for every retry of the same transfer, and never for a different one.
+                Optional, but strongly recommended for anything that moves funds.
+            schema:
+                type: string
+            example: 8f14e45f-ea0c-4b21-9f6b-2f8a6d3c1e70
+
+    schemas:
+        ChainId:
+            type: string
+            description: |
+                Environment-specific chain identifier stored on the wallet. Testnet values appear
+                when the API runs outside production.
+            enum:
+                - tron_mainnet
+                - tron_nile
+                - ethereum_mainnet
+                - ethereum_sepolia
+                - bsc_mainnet
+                - bsc_testnet
+                - bitcoin_mainnet
+                - bitcoin_testnet
+            example: tron_mainnet
+
+        NetworkName:
+            type: string
+            enum: [bitcoin, ethereum, bsc, tron]
+            example: tron
+
+        Coin:
+            type: object
+            description: An asset available on a network.
+            properties:
+                coinId:
+                    type: string
+                    format: uuid
+                networkId:
+                    type: string
+                    format: uuid
+                coinSymbol:
+                    type: string
+                    example: USDT
+                coinName:
+                    type: string
+                    example: Tether USD
+                coinContractAddress:
+                    type: [string, "null"]
+                    description: Token contract address. `null` for native currencies.
+                    example: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
+                coinDecimals:
+                    type: integer
+                    example: 6
+                coinIsNative:
+                    type: boolean
+                    description: True for the currency that pays this chain's fees.
+                    example: false
+                coinIsActive:
+                    type: boolean
+                    example: true
+                displayName:
+                    type: string
+                    description: Human label, e.g. `USDT (TRC20)`.
+                    example: USDT (TRC20)
+                tokenStandard:
+                    type: string
+                    enum: [Native, ERC20, BEP20, TRC20]
+                    example: TRC20
+
+        Network:
+            type: object
+            properties:
+                networkId:
+                    type: string
+                    format: uuid
+                networkName:
+                    $ref: "#/components/schemas/NetworkName"
+                networkIsActive:
+                    type: boolean
+                    example: true
+                createdAt:
+                    type: string
+                    format: date-time
+                coins:
+                    type: array
+                    items:
+                        $ref: "#/components/schemas/Coin"
+
+        Wallet:
+            type: object
+            description: A wallet as returned by the create, list, and detail endpoints.
+            properties:
+                walletReference:
+                    type: string
+                    description: The identifier you assigned.
+                    example: user_8842
+                walletAddress:
+                    type: string
+                    description: Receiving address on-chain.
+                    example: TJRabPrwbZy45sbavfcjinPJC18kjpRTv8
+                walletChain:
+                    $ref: "#/components/schemas/ChainId"
+                network:
+                    $ref: "#/components/schemas/NetworkName"
+                walletStatus:
+                    type: string
+                    enum: [active, inactive]
+                    example: active
+                coins:
+                    type: array
+                    description: Assets supported on this wallet's network. Empty if the network row is missing.
+                    items:
+                        $ref: "#/components/schemas/Coin"
+                createdAt:
+                    type: string
+                    format: date-time
+                    example: "2026-08-07T14:22:31.000Z"
+
+        WalletRecord:
+            type: object
+            description: |
+                Wallet shape returned by `PATCH /wallets/{walletReference}`. It differs from
+                `Wallet`: it exposes internal identifiers and omits `network` and `coins`.
+            properties:
+                walletId:
+                    type: string
+                    format: uuid
+                organizationId:
+                    type: string
+                    format: uuid
+                walletReference:
+                    type: string
+                    example: user_8842
+                walletAddress:
+                    type: string
+                walletChain:
+                    $ref: "#/components/schemas/ChainId"
+                walletStatus:
+                    type: string
+                    enum: [active, inactive]
+                createdAt:
+                    type: string
+                    format: date-time
+
+        Balances:
+            type: object
+            description: |
+                Live balances in whole units, keyed by lowercase asset symbol. Which keys are
+                present depends on the wallet's network.
+            additionalProperties:
+                type: number
+            example:
+                trx: 12.5
+                usdt: 430.25
+                usdc: 0
+
+        Pagination:
+            type: object
+            properties:
+                page:
+                    type: integer
+                    example: 1
+                limit:
+                    type: integer
+                    example: 20
+                total:
+                    type: integer
+                    description: Total rows matching the filters, across all pages.
+                    example: 143
+                totalPages:
+                    type: integer
+                    example: 8
+
+        WalletTransaction:
+            type: object
+            description: Transaction row as returned by `GET /wallets/{walletReference}/transactions`.
+            properties:
+                transactionId:
+                    type: string
+                    format: uuid
+                txHash:
+                    type: string
+                txFromAddress:
+                    type: string
+                txToAddress:
+                    type: string
+                txAmount:
+                    type: number
+                    example: 100
+                txAsset:
+                    type: string
+                    example: USDT
+                txType:
+                    type: string
+                    enum: [deposit, withdrawal]
+                txStatus:
+                    type: string
+                    enum: [pending, confirmed, failed]
+                blockNumber:
+                    type: integer
+                    example: 61234567
+                createdAt:
+                    type: string
+                    format: date-time
+
+        LedgerTransaction:
+            type: object
+            description: |
+                Transaction row as returned by `GET /transactions` and `GET /transfers/{txHash}`.
+                Field names differ from `WalletTransaction`: the primary key is `txId`, and the
+                addresses are `fromAddress`/`toAddress`.
+            properties:
+                txId:
+                    type: string
+                    format: uuid
+                    description: Traycer's identifier for the row.
+                txHash:
+                    type: string
+                    description: On-chain transaction hash.
+                walletId:
+                    type: string
+                    format: uuid
+                walletReference:
+                    type: string
+                    example: user_8842
+                walletChain:
+                    $ref: "#/components/schemas/ChainId"
+                fromAddress:
+                    type: string
+                toAddress:
+                    type: string
+                txAmount:
+                    type: number
+                    example: 100
+                txAsset:
+                    type: string
+                    example: USDT
+                txType:
+                    type: string
+                    enum: [deposit, withdrawal]
+                txStatus:
+                    type: string
+                    enum: [pending, confirmed, failed]
+                blockNumber:
+                    type: integer
+                createdAt:
+                    type: string
+                    format: date-time
+
+        TransferRequest:
+            type: object
+            required: [fromWalletReference, toAddress, amount, asset, network]
+            properties:
+                fromWalletReference:
+                    type: string
+                    minLength: 1
+                    maxLength: 255
+                    description: Wallet to send from. Must be active and owned by your organization.
+                    example: user_8842
+                toAddress:
+                    type: string
+                    minLength: 1
+                    description: Destination address. Validated against the network's address format.
+                    example: TXk9YourDestinationAddress0000000000
+                amount:
+                    type: number
+                    exclusiveMinimum: 0
+                    description: Amount in whole units of `asset` — 100 USDT, not 100000000 base units.
+                    example: 100
+                asset:
+                    type: string
+                    description: Asset symbol. Must be active on `network`.
+                    example: USDT
+                network:
+                    $ref: "#/components/schemas/NetworkName"
+
+        TransferQuote:
+            type: object
+            properties:
+                fromAddress:
+                    type: string
+                toAddress:
+                    type: string
+                amount:
+                    type: number
+                asset:
+                    type: string
+                network:
+                    $ref: "#/components/schemas/NetworkName"
+                estimatedFee:
+                    type: number
+                    description: Estimated network fee, denominated in `feeAsset`. An estimate, not a quoted price.
+                    example: 14.785
+                feeAsset:
+                    type: string
+                    description: Currency the fee is paid in — always the chain's native currency.
+                    example: TRX
+                isSufficient:
+                    type: boolean
+                    description: Whether the wallet can cover both the amount and the fee right now.
+                reason:
+                    type: [string, "null"]
+                    description: Why the transfer would fail. `null` when `isSufficient` is true.
+                    example: null
+                currentBalances:
+                    $ref: "#/components/schemas/Balances"
+
+        TransferResult:
+            type: object
+            properties:
+                txId:
+                    type: string
+                    description: On-chain transaction hash of the broadcast transaction.
+                    example: 3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2
+                fromAddress:
+                    type: string
+                toAddress:
+                    type: string
+                amount:
+                    type: number
+                asset:
+                    type: string
+
+        WebhookSubscription:
+            type: object
+            properties:
+                subscriptionId:
+                    type: string
+                    format: uuid
+                webhookUrl:
+                    type: string
+                    format: uri
+                webhookIsActive:
+                    type: boolean
+                createdAt:
+                    type: string
+                    format: date-time
+
+        WebhookEvent:
+            type: object
+            required: [event, timestamp, data]
+            properties:
+                event:
+                    type: string
+                    enum: [transaction.deposit, transaction.withdrawal]
+                timestamp:
+                    type: string
+                    format: date-time
+                    description: When the delivery was generated.
+                data:
+                    type: object
+                    description: The full indexed transaction row.
+                    properties:
+                        transactionId:
+                            type: string
+                            format: uuid
+                        organizationId:
+                            type: string
+                            format: uuid
+                        walletId:
+                            type: string
+                            format: uuid
+                        txHash:
+                            type: string
+                        txFromAddress:
+                            type: string
+                        txToAddress:
+                            type: string
+                        txAmount:
+                            type: number
+                        txAsset:
+                            type: string
+                        txType:
+                            type: string
+                            enum: [deposit, withdrawal]
+                        txStatus:
+                            type: string
+                            enum: [pending, confirmed, failed]
+                        blockNumber:
+                            type: integer
+                        createdAt:
+                            type: string
+                            format: date-time
+
+        ErrorResponse:
+            type: object
+            required: [message, code]
+            properties:
+                message:
+                    type: string
+                    example: Wallet not found or not owned by organization
+                code:
+                    type: integer
+                    example: 400
+
+        ValidationErrorResponse:
+            type: object
+            required: [message, code, validationErrors]
+            properties:
+                message:
+                    type: string
+                    enum: [Validation failed]
+                    example: Validation failed
+                code:
+                    type: integer
+                    example: 400
+                validationErrors:
+                    type: array
+                    description: One entry per failed field. `path` locates the field in the request.
+                    items:
+                        type: object
+                        properties:
+                            path:
+                                type: array
+                                items:
+                                    type: [string, integer]
+                                example: [amount]
+                            message:
+                                type: string
+                                example: Amount must be a positive number
+
+        RateLimitResponse:
+            type: object
+            description: |
+                Rate limit rejections come from the HTTP layer and do **not** use the standard
+                envelope.
+            properties:
+                statusCode:
+                    type: integer
+                    example: 429
+                error:
+                    type: string
+                    example: Too Many Requests
+                message:
+                    type: string
+                    example: Rate limit exceeded, retry in 1 minute
+
+    responses:
+        ValidationError:
+            description: Request validation failed.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ValidationErrorResponse"
+                    example:
+                        message: Validation failed
+                        code: 400
+                        validationErrors:
+                            - path: [limit]
+                              message: Number must be less than or equal to 100
+
+        Unauthorized:
+            description: |
+                The API key is missing, malformed, unknown, expired, or its secret did not match.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ErrorResponse"
+                    examples:
+                        missingHeader:
+                            summary: No key sent
+                            value:
+                                message: Missing x-api-key header
+                                code: 401
+                        badFormat:
+                            summary: Not in prefix_secret shape
+                            value:
+                                message: Invalid API Key format
+                                code: 401
+                        unknownPrefix:
+                            summary: No key matches the prefix
+                            value:
+                                message: Invalid API Key prefix or key not found
+                                code: 401
+                        expired:
+                            summary: Past its expiry date
+                            value:
+                                message: API Key has expired
+                                code: 401
+                        badSecret:
+                            summary: Prefix matched, secret did not
+                            value:
+                                message: Invalid API Key secret
+                                code: 401
+
+        Forbidden:
+            description: The calling IP is not on the key's allowlist.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ErrorResponse"
+                    example:
+                        message: IP address 203.0.113.42 is not whitelisted for this API key
+                        code: 403
+
+        ForbiddenReadOnly:
+            description: |
+                The key lacks the `read_write` scope, or the calling IP is not on its allowlist.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ErrorResponse"
+                    examples:
+                        readOnlyKey:
+                            summary: Read-only key on a write endpoint
+                            value:
+                                message: Insufficient permissions. API Key has read-only access.
+                                code: 403
+                        ipBlocked:
+                            summary: IP not allowlisted
+                            value:
+                                message: IP address 203.0.113.42 is not whitelisted for this API key
+                                code: 403
+
+        TooManyRequests:
+            description: |
+                Rate limit exceeded — 60 requests per minute per IP in production. Check
+                `retry-after` and the `x-ratelimit-*` headers.
+            headers:
+                retry-after:
+                    description: Seconds to wait before retrying.
+                    schema:
+                        type: integer
+                x-ratelimit-limit:
+                    description: Requests permitted per window.
+                    schema:
+                        type: integer
+                x-ratelimit-remaining:
+                    description: Requests left in the current window.
+                    schema:
+                        type: integer
+                x-ratelimit-reset:
+                    description: Seconds until the window resets.
+                    schema:
+                        type: integer
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/RateLimitResponse"
+                    example:
+                        statusCode: 429
+                        error: Too Many Requests
+                        message: Rate limit exceeded, retry in 1 minute
+
+        InternalServerError:
+            description: |
+                Something failed server-side — including upstream blockchain nodes being
+                unreachable. The message is always generic; details are not exposed.
+            content:
+                application/json:
+                    schema:
+                        $ref: "#/components/schemas/ErrorResponse"
+                    example:
+                        message: An error occurred while processing your request. Please try again later or contact support.
+                        code: 500

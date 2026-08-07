@@ -1,0 +1,62 @@
+---
+title: "List wallet transactions"
+description: "Indexed deposits and withdrawals for a single wallet."
+openapi: "GET /wallets/{walletReference}/transactions"
+---
+
+<Note>
+  Requires a `read` scope key.
+</Note>
+
+Returns rows newest-first under `data.transactions`, with `data.pagination` alongside.
+
+## Field names differ from GET /transactions
+
+<Warning>
+  This endpoint and [`GET /transactions`](/api-reference/transactions/list-transactions) return the same underlying rows under **different names**. A parser written for one will silently produce `undefined` on the other.
+</Warning>
+
+| Concept | Here | `GET /transactions` |
+| --- | --- | --- |
+| Rows array | `data.transactions` | `data.items` |
+| Row identifier | `transactionId` | `txId` |
+| Source address | `txFromAddress` | `fromAddress` |
+| Destination address | `txToAddress` | `toAddress` |
+| Wallet context | *(implied by the path)* | `walletReference`, `walletChain`, `walletId` |
+
+[Pagination and filtering](/guides/pagination) has a normalizer that handles both.
+
+## Filters
+
+| Parameter | Values |
+| --- | --- |
+| `type` | `deposit`, `withdrawal` |
+| `status` | `pending`, `confirmed`, `failed` |
+| `page` | Default `1` |
+| `limit` | Default `20`, max `100` |
+
+```bash
+curl -G $BASE/wallets/user_8842/transactions \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  --data-urlencode "type=deposit" \
+  --data-urlencode "status=confirmed"
+```
+
+## Indexing lag
+
+Rows appear once the background poller has seen the transaction on-chain. It runs every 10 seconds and stays 3 confirmations behind the head, so a transfer you just broadcast will not be here immediately.
+
+<Note>
+  **Indexing currently runs on Tron only.** Wallets on Ethereum, BSC, and Bitcoin work for creation, balances, quoting, and sending, but their transactions are not indexed — this endpoint will return an empty list for them.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="List transactions" icon="list-check" href="/api-reference/transactions/list-transactions">
+    The same data across every wallet, with more filters.
+  </Card>
+  <Card title="Pagination" icon="list" href="/guides/pagination">
+    Both response shapes side by side.
+  </Card>
+</CardGroup>

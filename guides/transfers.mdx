@@ -1,0 +1,319 @@
+---
+title: "Transfers"
+description: "Quote, send, and track funds leaving a wallet — including what a 201 does and does not mean."
+icon: "paper-plane"
+---
+
+Moving funds is two endpoints: one that prices the transfer without touching anything, and one that signs and broadcasts it. Use both, in that order, every time.
+
+<Steps>
+  <Step title="Quote" icon="calculator">
+    `POST /transfers/quote` estimates the network fee and reports whether the wallet can cover amount + fee right now. Read-only, `read` scope, no side effects.
+  </Step>
+  <Step title="Send" icon="paper-plane">
+    `POST /transfers` re-checks sufficiency, signs with the wallet's decrypted key, and broadcasts. `read_write` scope. Irreversible.
+  </Step>
+  <Step title="Track" icon="magnifying-glass">
+    The `transaction.withdrawal` webhook fires, and the transaction appears in `GET /transactions` and `GET /transfers/{txHash}`, once the poller has indexed the block.
+  </Step>
+</Steps>
+
+## The request body
+
+Both endpoints take the same five fields.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `fromWalletReference` | string | Your wallet's reference. Must exist, be yours, and be `active`. |
+| `toAddress` | string | Destination. Validated against the network's address format. |
+| `amount` | number | **Whole units** — `100` means 100 USDT. Must be greater than zero. |
+| `asset` | string | Symbol, e.g. `USDT`. Must be active on `network`. |
+| `network` | string | `bitcoin`, `ethereum`, `bsc`, or `tron`. Must be active. |
+
+<Warning>
+  `amount` is in whole units, never base units. Sending `100000000` intending 100 USDT attempts to transfer one hundred million USDT — which will fail on balance, but do not rely on that as a safety net.
+</Warning>
+
+## Quote first
+
+```bash
+curl -X POST $BASE/transfers/quote \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromWalletReference": "user_8842",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron"
+  }'
+```
+
+```json 201
+{
+  "message": "Transfer quote generated successfully",
+  "code": 201,
+  "data": {
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron",
+    "estimatedFee": 14.785,
+    "feeAsset": "TRX",
+    "isSufficient": true,
+    "reason": null,
+    "currentBalances": { "trx": 42.5, "usdt": 430.25, "usdc": 0 }
+  }
+}
+```
+
+<Note>
+  The status is `201`, not `200`, even though nothing was created. Check for success by status class or by reading `code`, not by comparing to `200`.
+</Note>
+
+Two fields drive your logic:
+
+- **`isSufficient`** — whether this transfer would go through right now.
+- **`reason`** — `null` when sufficient; otherwise a sentence naming what is missing.
+
+The `reason` values you will actually see:
+
+| Situation | `reason` |
+| --- | --- |
+| Not enough of the token being sent | `Insufficient USDT balance for transfer amount` |
+| Token balance fine, no native currency for gas | `Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.` |
+| Sending native currency, not enough for amount | `Insufficient TRX balance for transfer amount` |
+| Sending native currency, amount fits but fee does not | `Insufficient TRX to cover estimated transfer fee of 0.267 TRX` |
+
+Those two categories deserve different handling: a token shortfall is the user's problem, a gas shortfall is yours.
+
+```javascript
+const quote = await traycer("/transfers/quote", { method: "POST", body });
+
+if (!quote.isSufficient) {
+    const isGasProblem = quote.reason?.includes("gas");
+
+    if (isGasProblem) {
+        await topUpGas({ walletReference: body.fromWalletReference });
+        // ...then re-quote
+    }
+
+    throw new Error(quote.reason);
+}
+```
+
+<Tip>
+  A quote is a snapshot, not a reservation. Nothing is held, and the wallet's balance can change between quoting and sending. Quote immediately before sending, not at the start of a long user flow.
+</Tip>
+
+## Send
+
+```bash
+curl -X POST $BASE/transfers \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Idempotency-Key: 8f14e45f-ea0c-4b21-9f6b-2f8a6d3c1e70" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fromWalletReference": "user_8842",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT",
+    "network": "tron"
+  }'
+```
+
+```json 201
+{
+  "message": "Transfer initiated successfully",
+  "code": 201,
+  "data": {
+    "txId": "3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "amount": 100,
+    "asset": "USDT"
+  }
+}
+```
+
+`txId` is the on-chain transaction hash. Store it — it is your handle for everything that follows, and it is what you paste into a block explorer when someone asks where their money is.
+
+<Warning>
+  **`201` means broadcast, not confirmed.** The transaction has been accepted by the network. It has not necessarily been included in a block, and it can still fail there. What it cannot do is be recalled — nothing you send afterwards will reverse it.
+</Warning>
+
+Always send an `Idempotency-Key`. Without one, a request that times out leaves you unable to distinguish "never sent" from "sent, response lost" — and retrying to find out is how people pay twice. See [Idempotency](/guides/idempotency).
+
+### What happens before broadcasting
+
+The send path re-runs every check rather than trusting your earlier quote:
+
+1. **Validation** — network active, asset active on that network, wallet exists and is yours, wallet `active`, address valid for the network, amount positive.
+2. **Idempotency claim** — if you supplied a key, it is claimed here. A completed key replays its stored response; an in-flight one returns `409`; the same key with a different body returns `422`.
+3. **Live balance and fee re-check** — balances are re-read from the chain and re-quoted. Insufficient funds fail here with `400`.
+4. **Sign and broadcast** — only now is the private key decrypted and the transaction submitted.
+
+If any step fails, nothing was broadcast and the idempotency claim is released so a corrected retry under the same key works normally.
+
+### Rejections
+
+Validation failures carry `validationErrors`:
+
+```json 400
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["fromWalletReference"], "message": "Sender wallet is currently inactive" }
+  ]
+}
+```
+
+The balance re-check at step 3 returns a plain message instead — it is not a field-level problem:
+
+```json 400
+{
+  "message": "Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.",
+  "code": 400
+}
+```
+
+Handle both: check for `validationErrors` before assuming it is present.
+
+| Status | Meaning |
+| --- | --- |
+| `400` | Rejected before broadcasting — validation, or insufficient funds. |
+| `401` | Bad API key. |
+| `403` | Key is `read`-scoped, or IP not allowlisted. |
+| `409` | Same `Idempotency-Key` still in progress. |
+| `422` | Same `Idempotency-Key`, different payload. |
+| `429` | Rate limited. |
+| `500` | Server or upstream node failure. **Treat as unknown, not as failed** — see below. |
+
+<Warning>
+  A `500` or a timeout on `POST /transfers` does not mean the transfer did not happen. It may have been broadcast before the response was lost. Retry with the **same** `Idempotency-Key` — never a fresh one — or check `GET /transactions` before doing anything else.
+</Warning>
+
+## Tracking a transfer afterwards
+
+Once broadcast, a transfer becomes visible through the background poller, which scans blocks and records transfers touching your wallets. It runs every 10 seconds and stays 3 confirmations behind the chain head, so there is a delay between broadcasting and the transaction appearing in the API.
+
+<Note>
+  **Deposit and withdrawal indexing currently runs on Tron only.** Transfers on Ethereum, BSC, and Bitcoin broadcast normally and return a `txId`, but they will not appear in `GET /transactions` or `GET /transfers/{txHash}`, and they do not fire webhooks.
+
+  On those chains, track the returned `txId` yourself against a block explorer or your own node until indexing is extended.
+</Note>
+
+That produces a specific gotcha:
+
+```bash
+# Broadcast — succeeds
+curl -X POST $BASE/transfers ... # → 201 { "txId": "3f8a91..." }
+
+# Immediately look it up — fails
+curl $BASE/transfers/3f8a91... -H "x-api-key: $KEY"
+```
+
+```json 400
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["txHash"], "message": "Transaction not found or does not belong to this organization" }
+  ]
+}
+```
+
+That is expected: the block containing your transaction has not been indexed yet. It is not evidence the transfer failed.
+
+<Tip>
+  Do not poll `GET /transfers/{txHash}` in a tight loop after broadcasting. Record the `txId` as pending in your own system, and let the `transaction.withdrawal` webhook flip it to confirmed — with a slower reconciliation sweep over [`GET /transactions`](/api-reference/transactions/list-transactions) as the backstop.
+</Tip>
+
+Once indexed:
+
+```json 200
+{
+  "message": "Transaction details retrieved successfully",
+  "code": 200,
+  "data": {
+    "txId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+    "txHash": "3f8a91c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+    "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+    "walletReference": "user_8842",
+    "walletChain": "tron_mainnet",
+    "fromAddress": "TJRabPrwbZy45sbavfcjinPJC18kjpRTv8",
+    "toAddress": "TXk9YourDestinationAddress0000000000",
+    "txAmount": 100,
+    "txAsset": "USDT",
+    "txType": "withdrawal",
+    "txStatus": "confirmed",
+    "blockNumber": 61234599,
+    "createdAt": "2026-08-07T14:35:10.000Z"
+  }
+}
+```
+
+<Warning>
+  Confusing pair: in the **send** response, `txId` is the on-chain hash. In the **lookup** response, `txId` is Traycer's internal row ID and the on-chain hash is `txHash`. Match `txId` from a send against `txHash` on a lookup.
+</Warning>
+
+## A production-shaped payout
+
+```javascript
+import crypto from "crypto";
+
+export const payout = async ({ walletReference, toAddress, amount, asset, network, payoutId }) => {
+    const body = { fromWalletReference: walletReference, toAddress, amount, asset, network };
+
+    // One key per logical payout, persisted so retries reuse it
+    const idempotencyKey = await getOrCreateIdempotencyKey(payoutId);
+
+    const quote = await traycer("/transfers/quote", { method: "POST", body });
+
+    if (!quote.isSufficient) {
+        await markPayout(payoutId, "blocked", { reason: quote.reason });
+        return { status: "blocked", reason: quote.reason };
+    }
+
+    try {
+        const transfer = await traycer("/transfers", {
+            method: "POST",
+            body,
+            headers: { "Idempotency-Key": idempotencyKey },
+        });
+
+        await markPayout(payoutId, "broadcast", { txHash: transfer.txId });
+        return { status: "broadcast", txHash: transfer.txId };
+    } catch (error) {
+        // Still running — safe to retry later under the same key
+        if (error.code === 409) return { status: "pending" };
+
+        // Key reused with a different body: a real bug, not a retry
+        if (error.code === 422) throw error;
+
+        // Unknown outcome — do NOT re-send with a new key
+        if (error.code >= 500) {
+            await markPayout(payoutId, "unknown", { error: error.message });
+            return { status: "unknown" };
+        }
+
+        await markPayout(payoutId, "rejected", { error: error.message });
+        return { status: "rejected", reason: error.message };
+    }
+};
+```
+
+The important detail is that every failure mode maps to a distinct state, and none of them re-send with a fresh key.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Idempotency" icon="shield-check" href="/guides/idempotency">
+    How to make retries safe.
+  </Card>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    Getting told when a transfer confirms.
+  </Card>
+</CardGroup>

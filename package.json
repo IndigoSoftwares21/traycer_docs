@@ -1,0 +1,22 @@
+{
+  "name": "traycer_docs",
+  "version": "1.0.0",
+  "description": "Use the starter kit to get your docs deployed and ready to customize.",
+  "main": "index.js",
+  "scripts": {
+    "dev": "mintlify dev",
+    "start": "mintlify dev",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IndigoSoftwares21/traycer_docs.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/IndigoSoftwares21/traycer_docs/issues"
+  },
+  "homepage": "https://github.com/IndigoSoftwares21/traycer_docs#readme"
+}

@@ -1,0 +1,53 @@
+---
+title: "List subscriptions"
+description: "Every webhook endpoint registered for your organization."
+openapi: "GET /webhooks/subscriptions"
+---
+
+<Note>
+  Requires a `read` scope key. Takes no parameters and is **not paginated** — it returns everything.
+</Note>
+
+Subscriptions come back newest-first under `data.subscriptions`.
+
+<Warning>
+  Signing secrets are never included. If you have lost one, you cannot read it back — [rotate it](/api-reference/webhooks/rotate-secret) to get a new one, remembering that the old secret dies immediately.
+</Warning>
+
+## Fields
+
+| Field | Notes |
+| --- | --- |
+| `subscriptionId` | UUID. Needed to delete or rotate. |
+| `webhookUrl` | The registered endpoint. |
+| `webhookIsActive` | Only active subscriptions receive deliveries. |
+| `createdAt` | ISO 8601 UTC. |
+
+## Auditing what is registered
+
+```javascript
+const { subscriptions } = await traycer("/webhooks/subscriptions");
+
+const stale = subscriptions.filter(
+    (s) => s.webhookUrl.includes("ngrok") || s.webhookUrl.includes("localhost"),
+);
+
+for (const sub of stale) {
+    await traycer(`/webhooks/subscriptions/${sub.subscriptionId}`, { method: "DELETE" });
+}
+```
+
+<Tip>
+  Tunnel URLs from local testing are the usual source of dead subscriptions. They accumulate failed deliveries in your logs — sweep them before launch. See [Going live](/guides/going-live).
+</Tip>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Delete subscription" icon="trash" href="/api-reference/webhooks/delete-subscription">
+    Remove one permanently.
+  </Card>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    Delivery semantics and handler design.
+  </Card>
+</CardGroup>

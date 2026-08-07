@@ -1,0 +1,96 @@
+---
+title: "List transactions"
+description: "Every indexed deposit and withdrawal across your organization."
+openapi: "GET /transactions"
+---
+
+<Note>
+  Requires a `read` scope key.
+</Note>
+
+The organization-wide ledger, newest-first. This is the endpoint to reconcile against — webhooks are delivered once with no retry, so anything financially material should be confirmed here.
+
+<Warning>
+  Rows come back under **`data.items`**, not `data.transactions`. The per-wallet endpoint uses a different key, and different field names. See the table below.
+</Warning>
+
+## Filters
+
+| Parameter | Values | Matching |
+| --- | --- | --- |
+| `walletReference` | your reference | Exact. Must be a wallet you own, or `400`. |
+| `type` | `deposit`, `withdrawal` | Exact. |
+| `status` | `pending`, `confirmed`, `failed` | Exact. |
+| `asset` | e.g. `USDT` | Exact, **case-sensitive**. `usdt` matches nothing. |
+| `search` | any string | Case-insensitive partial match on `txHash`, `fromAddress`, or `toAddress`. |
+| `page` | integer | Default `1`. |
+| `limit` | integer | Default `20`, max `100`. |
+
+Filters combine with `AND`.
+
+```bash
+curl -G $BASE/transactions \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  --data-urlencode "walletReference=user_8842" \
+  --data-urlencode "type=deposit" \
+  --data-urlencode "status=confirmed" \
+  --data-urlencode "asset=USDT" \
+  --data-urlencode "limit=100"
+```
+
+## Field names differ from the per-wallet endpoint
+
+| Concept | Here | [`GET /wallets/{ref}/transactions`](/api-reference/wallets/list-wallet-transactions) |
+| --- | --- | --- |
+| Rows array | `data.items` | `data.transactions` |
+| Row identifier | `txId` | `transactionId` |
+| Source address | `fromAddress` | `txFromAddress` |
+| Destination address | `toAddress` | `txToAddress` |
+| Wallet context | `walletReference`, `walletChain`, `walletId` | *(implied by the path)* |
+
+<Tip>
+  Prefer this endpoint for anything cross-wallet: each row carries `walletReference`, so you can attribute a transaction without a second lookup. The per-wallet endpoint cannot, because the wallet is implied by the URL.
+</Tip>
+
+## Reconciliation
+
+```javascript Sweep for anything webhooks missed
+const reconcile = async ({ since }) => {
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+        const params = new URLSearchParams({ page, limit: 100, status: "confirmed" });
+        const data = await traycer(`/transactions?${params}`);
+
+        for (const tx of data.items) {
+            if (new Date(tx.createdAt) < since) return;   // walked past the window
+            await processIfUnseen(tx);                     // dedupe on txHash + txType
+        }
+
+        totalPages = data.pagination.totalPages;
+        page += 1;
+    }
+};
+```
+
+<Warning>
+  Rows are ordered by creation time descending, so transactions arriving mid-sweep shift later pages — you may see one twice or miss one. Deduplicate on `txHash` + `txType` as you go, or work within a fixed time window.
+</Warning>
+
+## Indexing coverage
+
+<Note>
+  **Currently Tron only.** Deposits and withdrawals on Ethereum, BSC, and Bitcoin are not indexed and will not appear here. The poller runs every 10 seconds and stays 3 confirmations behind the head, so recent transactions lag by at least that.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Pagination and filtering" icon="list" href="/guides/pagination">
+    Safe iteration and a normalizer for both row shapes.
+  </Card>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    The fast path this endpoint backstops.
+  </Card>
+</CardGroup>

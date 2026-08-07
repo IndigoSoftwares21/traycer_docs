@@ -1,0 +1,220 @@
+---
+title: "Pagination and filtering"
+description: "How list endpoints page, which key holds the rows, and why the shapes differ between them."
+icon: "list"
+---
+
+Three endpoints are paginated, and all three use offset pagination with the same two parameters.
+
+| Endpoint | Rows under |
+| --- | --- |
+| [`GET /wallets`](/api-reference/wallets/list-wallets) | `data.wallets` |
+| [`GET /wallets/{walletReference}/transactions`](/api-reference/wallets/list-wallet-transactions) | `data.transactions` |
+| [`GET /transactions`](/api-reference/transactions/list-transactions) | `data.items` |
+
+<Warning>
+  **The rows live under a different key on each endpoint.** There is no shared `items` convention — `GET /transactions` uses `items`, the other two do not. Write one accessor per endpoint rather than a generic list helper that guesses.
+</Warning>
+
+[`GET /networks`](/api-reference/networks/list-networks) and [`GET /webhooks/subscriptions`](/api-reference/webhooks/list-subscriptions) are not paginated; they return everything.
+
+## Parameters
+
+| Parameter | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `page` | integer | `1` | 1-based. Must be ≥ 1. |
+| `limit` | integer | `20` | Must be between 1 and 100. |
+
+<Note>
+  A `limit` above 100 is **rejected**, not clamped:
+
+  ```json
+  {
+    "message": "Validation failed",
+    "code": 400,
+    "validationErrors": [
+      { "path": ["limit"], "message": "Number must be less than or equal to 100" }
+    ]
+  }
+  ```
+</Note>
+
+Values arrive as query strings and are coerced to integers, so `?limit=50` and `?limit=50.0` both work, while `?limit=fifty` is a `400`.
+
+## The pagination object
+
+Every paginated response includes the same block alongside its rows:
+
+```json
+{
+  "pagination": {
+    "page": 1,
+    "limit": 20,
+    "total": 143,
+    "totalPages": 8
+  }
+}
+```
+
+- **`total`** — rows matching your filters across all pages, not the number on this page.
+- **`totalPages`** — `ceil(total / limit)`.
+
+`total` is computed with a separate count query against the same filters, so it stays accurate as you page.
+
+<Note>
+  Field order differs slightly between endpoints — `GET /transactions` returns `total` first, the others return `page` first. Irrelevant in JSON, but it will show up in your diffs.
+</Note>
+
+## Iterating safely
+
+```javascript
+const fetchAllTransactions = async (filters = {}) => {
+    const all = [];
+    let page = 1;
+
+    while (true) {
+        const params = new URLSearchParams({ ...filters, page, limit: 100 });
+        const data = await traycer(`/transactions?${params}`);
+
+        all.push(...data.items);
+
+        if (page >= data.pagination.totalPages) break;
+        page += 1;
+    }
+
+    return all;
+};
+```
+
+<Warning>
+  Results are ordered newest-first by creation time. Rows inserted while you page will shift later pages — a new deposit arriving between page 1 and page 2 pushes one row down and you may see it twice, or miss one.
+
+  For a long sweep, either page from the last page backwards, or deduplicate on `txHash` as you go. For continuous reconciliation, filter to a fixed time window and process it as a batch.
+</Warning>
+
+## Filters
+
+Filters combine with `AND`. Everything below is optional.
+
+### GET /wallets
+
+| Parameter | Values | Matching |
+| --- | --- | --- |
+| `search` | any string | Case-insensitive partial match on `walletReference` **or** `walletAddress`. |
+| `network` | chain identifier | Exact match on `walletChain` — pass `tron_mainnet`, not `tron`. |
+| `status` | `active`, `inactive` | Exact. |
+
+<Warning>
+  `?network=tron` returns nothing. The filter compares against the stored `walletChain`, which carries the environment: `tron_mainnet`, `tron_nile`, `ethereum_mainnet`, `ethereum_sepolia`, `bsc_mainnet`, `bsc_testnet`, `bitcoin_mainnet`, `bitcoin_testnet`.
+</Warning>
+
+### GET /wallets/{walletReference}/transactions
+
+| Parameter | Values |
+| --- | --- |
+| `type` | `deposit`, `withdrawal` |
+| `status` | `pending`, `confirmed`, `failed` |
+
+### GET /transactions
+
+| Parameter | Values | Matching |
+| --- | --- | --- |
+| `walletReference` | your reference | Exact. Must be a wallet you own, or `400`. |
+| `type` | `deposit`, `withdrawal` | Exact. |
+| `status` | `pending`, `confirmed`, `failed` | Exact. |
+| `asset` | e.g. `USDT` | Exact, case-sensitive. |
+| `search` | any string | Case-insensitive partial match on `txHash`, `fromAddress`, or `toAddress`. |
+
+```bash Confirmed USDT deposits for one wallet
+curl -G $BASE/transactions \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  --data-urlencode "walletReference=user_8842" \
+  --data-urlencode "type=deposit" \
+  --data-urlencode "status=confirmed" \
+  --data-urlencode "asset=USDT" \
+  --data-urlencode "limit=100"
+```
+
+<Tip>
+  `asset` is compared exactly — `usdt` will not match `USDT`. Uppercase symbols before sending.
+</Tip>
+
+## Transaction shapes differ too
+
+The two transaction endpoints return the same underlying rows under **different field names**. This trips people up when they reuse a parser.
+
+<CodeGroup>
+
+```json GET /wallets/{ref}/transactions
+{
+  "transactionId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+  "txHash": "3f8a91...",
+  "txFromAddress": "TXk9...",
+  "txToAddress": "TJRab...",
+  "txAmount": 100,
+  "txAsset": "USDT",
+  "txType": "deposit",
+  "txStatus": "confirmed",
+  "blockNumber": 61234567,
+  "createdAt": "2026-08-07T14:31:02.000Z"
+}
+```
+
+```json GET /transactions
+{
+  "txId": "9c2f4b81-77aa-4c1e-93de-5f6a7b8c9d01",
+  "txHash": "3f8a91...",
+  "walletId": "1f2e3d4c-5b6a-4798-8a9b-0c1d2e3f4a5b",
+  "walletReference": "user_8842",
+  "walletChain": "tron_mainnet",
+  "fromAddress": "TXk9...",
+  "toAddress": "TJRab...",
+  "txAmount": 100,
+  "txAsset": "USDT",
+  "txType": "deposit",
+  "txStatus": "confirmed",
+  "blockNumber": 61234567,
+  "createdAt": "2026-08-07T14:31:02.000Z"
+}
+```
+
+</CodeGroup>
+
+| Concept | Wallet transactions | Organization transactions |
+| --- | --- | --- |
+| Row identifier | `transactionId` | `txId` |
+| Source address | `txFromAddress` | `fromAddress` |
+| Destination address | `txToAddress` | `toAddress` |
+| Wallet context | — (implied by the path) | `walletId`, `walletReference`, `walletChain` |
+
+Normalize at the boundary:
+
+```javascript
+const normalize = (row) => ({
+    id: row.txId ?? row.transactionId,
+    hash: row.txHash,
+    from: row.fromAddress ?? row.txFromAddress,
+    to: row.toAddress ?? row.txToAddress,
+    amount: row.txAmount,
+    asset: row.txAsset,
+    type: row.txType,
+    status: row.txStatus,
+    blockNumber: row.blockNumber,
+    createdAt: row.createdAt,
+});
+```
+
+<Tip>
+  Prefer `GET /transactions` for anything cross-wallet. It carries `walletReference` on each row, so you can attribute a transaction without a second lookup — the per-wallet endpoint cannot, because the wallet is implied by the URL.
+</Tip>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="List transactions" icon="code" href="/api-reference/transactions/list-transactions">
+    Try the filters in the playground.
+  </Card>
+  <Card title="Rate limits" icon="gauge-high" href="/guides/rate-limits">
+    Budget your requests before sweeping large result sets.
+  </Card>
+</CardGroup>

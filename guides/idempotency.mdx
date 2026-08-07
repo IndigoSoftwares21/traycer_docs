@@ -1,0 +1,160 @@
+---
+title: "Idempotency"
+description: "Make transfer retries safe, so a timeout can never turn into a double payment."
+icon: "shield-check"
+---
+
+A request that times out tells you nothing. The transfer may have been broadcast and the response lost, or it may never have reached the server. Retrying blindly can send twice; not retrying can leave a user unpaid. Neither is acceptable when the operation is irreversible.
+
+An idempotency key resolves the ambiguity: retry with the same key and you either get the original result back or a clear signal to wait.
+
+```bash
+curl -X POST $BASE/transfers \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Idempotency-Key: 8f14e45f-ea0c-4b21-9f6b-2f8a6d3c1e70" \
+  -H "Content-Type: application/json" \
+  -d '{ "fromWalletReference": "user_8842", "toAddress": "TXk9...", "amount": 100, "asset": "USDT", "network": "tron" }'
+```
+
+<Note>
+  The header is currently **optional** — a request without one is accepted and processed normally. It is optional in the protocol, not in a correct integration. Send it on every `POST /transfers`.
+</Note>
+
+## The four outcomes
+
+When you send `Idempotency-Key`, the server claims that key against a hash of the request body before doing anything else.
+
+<AccordionGroup>
+  <Accordion title="First use — the transfer runs" icon="circle-play">
+    The key is unused. It is claimed, marked in progress, the transfer executes, and the response is stored against the key.
+  </Accordion>
+
+  <Accordion title="Retry after success — the response is replayed" icon="rotate-left">
+    The key has a stored response and the body hash matches. That stored response is returned verbatim, with its original status code. **No second transfer.** This is the case that makes retrying safe.
+  </Accordion>
+
+  <Accordion title="Retry while the first is still running — 409" icon="hourglass-half">
+    The key is claimed and still in progress.
+
+    ```json
+    { "message": "A request with this Idempotency-Key is still in progress", "code": 409 }
+    ```
+
+    The original request is alive. Wait and retry with the same key — do not start a new one.
+  </Accordion>
+
+  <Accordion title="Same key, different body — 422" icon="triangle-exclamation">
+    The key exists but the request body hashes differently.
+
+    ```json
+    { "message": "This Idempotency-Key was already used with a different request payload", "code": 422 }
+    ```
+
+    Keys cannot be recycled across different transfers. A `422` is a bug in your key generation, not a transient error — do not retry it.
+  </Accordion>
+</AccordionGroup>
+
+There is a fifth, quieter behaviour worth knowing: **if the transfer fails, the claim is released.** A request rejected for insufficient funds, or one that errored server-side before broadcasting, frees its key. Retrying under the same key after fixing the problem works normally rather than replaying the failure.
+
+## Choosing keys
+
+<CardGroup cols={2}>
+  <Card title="One key per logical transfer" icon="fingerprint">
+    Generate it when you decide to pay someone, and reuse it for every attempt at that payment. `crypto.randomUUID()` is fine.
+  </Card>
+  <Card title="Persist it" icon="database">
+    Store the key alongside your payout record before the first request. A key held only in memory is gone exactly when you need it — after a crash.
+  </Card>
+  <Card title="Never reuse across transfers" icon="ban">
+    Two different payments need two different keys. Reuse is a `422`, and if the bodies happened to match, a silently swallowed second payment.
+  </Card>
+  <Card title="Do not derive keys from the body" icon="hashtag">
+    Hashing the payload makes two legitimate identical payments — same user, same amount, same day — collide. The second would replay the first and never send.
+  </Card>
+</CardGroup>
+
+```javascript
+// Correct: the key belongs to the payout record, created once
+const startPayout = async ({ userId, amount }) => {
+    const payout = await db.payouts.insert({
+        userId,
+        amount,
+        status: "pending",
+        idempotencyKey: crypto.randomUUID(),
+    });
+
+    return attemptPayout(payout);
+};
+
+const attemptPayout = async (payout) =>
+    traycer("/transfers", {
+        method: "POST",
+        headers: { "Idempotency-Key": payout.idempotencyKey },
+        body: {
+            fromWalletReference: payout.walletReference,
+            toAddress: payout.toAddress,
+            amount: payout.amount,
+            asset: payout.asset,
+            network: payout.network,
+        },
+    });
+```
+
+Every retry — a queue redelivery, a manual replay, a cron sweep of stuck payouts — calls `attemptPayout` with the same stored key. That is the whole discipline.
+
+## Retrying properly
+
+```javascript
+const sendWithRetry = async (payout, { attempts = 5 } = {}) => {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            return await attemptPayout(payout);
+        } catch (error) {
+            // Original request still running — wait, same key
+            if (error.code === 409) {
+                await sleep(2 ** attempt * 1000);
+                continue;
+            }
+
+            // Key reused with a different body — a bug, stop
+            if (error.code === 422) throw error;
+
+            // Rejected outright — stop; the key was released
+            if (error.code === 400) throw error;
+
+            // Unknown outcome — retry the SAME key, never a new one
+            if (error.code >= 500 || error.name === "TimeoutError") {
+                await sleep(2 ** attempt * 1000);
+                continue;
+            }
+
+            throw error;
+        }
+    }
+
+    throw new Error(`Payout ${payout.id} unresolved after ${attempts} attempts`);
+};
+```
+
+<Warning>
+  The one thing that must never happen: generating a fresh key because the previous attempt "failed". That is precisely how a lost response becomes two transfers.
+</Warning>
+
+## Scope of a key
+
+Keys are scoped to your organization, so nothing another customer does can collide with yours. They are stored alongside the request path and a hash of the payload, which is what makes the `422` check possible.
+
+<Note>
+  Only `POST /transfers` participates in idempotency. Sending the header to other endpoints is harmless but has no effect — and the others are either safe to repeat (`GET`, `PATCH` to the same status) or fail loudly on a duplicate anyway (`POST /wallets` rejects a reused reference; `POST /webhooks/subscriptions` rejects a duplicate URL).
+</Note>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Transfers" icon="paper-plane" href="/guides/transfers">
+    The full send flow this fits into.
+  </Card>
+  <Card title="Errors" icon="triangle-exclamation" href="/guides/errors">
+    Every status code and what to do about it.
+  </Card>
+</CardGroup>

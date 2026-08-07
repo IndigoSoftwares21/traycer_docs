@@ -1,0 +1,88 @@
+---
+title: "Quote a transfer"
+description: "Estimate the network fee and check the wallet can cover it — without moving anything."
+openapi: "POST /transfers/quote"
+---
+
+<Note>
+  Requires only a `read` scope key. It is a `POST` because it takes a body, but nothing moves — so read-only services can price transfers safely.
+</Note>
+
+Always quote before sending. The quote runs the same validation as [Send a transfer](/api-reference/transfers/send-transfer) and re-reads balances from the chain, so it is the cheapest way to find out that a transfer would fail.
+
+<Warning>
+  The status is `201`, not `200`, even though nothing was created. Check by status class or by reading `code` — not by comparing to `200`.
+</Warning>
+
+## Reading the result
+
+Two fields drive your logic:
+
+- **`isSufficient`** — whether this transfer would go through right now.
+- **`reason`** — `null` when sufficient; otherwise a sentence naming what is missing.
+
+| Situation | `reason` |
+| --- | --- |
+| Not enough of the token being sent | `Insufficient USDT balance for transfer amount` |
+| Token balance fine, no native currency for gas | `Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.` |
+| Sending native currency, not enough for the amount | `Insufficient TRX balance for transfer amount` |
+| Sending native currency, amount fits but the fee does not | `Insufficient TRX to cover estimated transfer fee of 0.267 TRX` |
+
+These are two different problems: a token shortfall is the user's, a gas shortfall is yours. Branch on them separately.
+
+```javascript
+const quote = await traycer("/transfers/quote", { method: "POST", body });
+
+if (!quote.isSufficient) {
+    if (quote.reason.includes("gas")) {
+        await topUpGas({ walletReference: body.fromWalletReference });
+        return retry();
+    }
+    return showUser(`Not enough ${body.asset} to send ${body.amount}.`);
+}
+```
+
+## Fees are estimates
+
+`estimatedFee` is calculated live, in `feeAsset` — always the chain's native currency.
+
+<AccordionGroup>
+  <Accordion title="Tron" icon="bolt">
+    TRC20 transfers are simulated against the contract to measure energy, priced at 420 sun per unit, plus ~0.345 TRX of bandwidth. Native TRX transfers cost ~0.267 TRX. Sending to an address never seen on-chain adds **1 TRX** for account activation — so a first payout to a fresh address costs more.
+  </Accordion>
+  <Accordion title="Ethereum and BSC" icon="fire">
+    21,000 gas for native, 65,000 for tokens, times the current gas price from the node. If the fee lookup fails, it falls back to 3 Gwei, which may under-quote during congestion.
+  </Accordion>
+  <Accordion title="Bitcoin" icon="bitcoin-sign">
+    Next-block fee rate applied to an assumed ~140 vByte native SegWit transaction. Falls back to 15 sat/vByte.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  A quote reserves nothing. Balances can change between quoting and sending, and gas prices move. Quote immediately before sending — not at the start of a long user flow — and leave headroom rather than funding a wallet with exactly the quoted amount.
+</Tip>
+
+## Errors
+
+All `400` with `validationErrors`:
+
+| `path` | `message` |
+| --- | --- |
+| `network` | `Network not found` / `Network is currently inactive` |
+| `asset` | `Asset USDC is not supported on network bitcoin` / `Asset USDT is currently inactive on network tron` |
+| `fromWalletReference` | `Sender wallet not found or not owned by organization` / `Sender wallet is currently inactive` |
+| `toAddress` | `Recipient address is not a valid address for this network` |
+| `amount` | `Amount must be a positive number` |
+
+Note that an insufficient balance is **not** an error here — it is a successful quote with `isSufficient: false`.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Send a transfer" icon="paper-plane" href="/api-reference/transfers/send-transfer">
+    The irreversible half.
+  </Card>
+  <Card title="Transfers" icon="book" href="/guides/transfers">
+    The full flow, with production-shaped code.
+  </Card>
+</CardGroup>

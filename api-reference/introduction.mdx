@@ -1,0 +1,116 @@
+---
+title: "API reference"
+description: "Base URL, authentication, conventions, and every endpoint in one place."
+icon: "code"
+---
+
+Fifteen endpoints over five resources. Every page in this section has a live playground — paste an API key into the **Authorization** panel and send a real request.
+
+## Base URL
+
+<CodeGroup>
+
+```bash Production
+https://your-domain.com/api/v1/http
+```
+
+```bash Local
+http://localhost:6969/api/v1/http
+```
+
+</CodeGroup>
+
+<Note>
+  `your-domain.com` is a placeholder — substitute your deployed host. The `v1` segment comes from the server's `API_VERSION` setting and defaults to `v1`.
+</Note>
+
+## Authentication
+
+Every request carries an API key in the `x-api-key` header:
+
+```bash
+curl $BASE/wallets -H "x-api-key: trc_live_a1b2c3d4_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+```
+
+Keys are scoped `read` or `read_write`. Each endpoint below states which it needs. Full details in [Authentication](/guides/authentication).
+
+## Conventions
+
+<AccordionGroup>
+  <Accordion title="One envelope for every response" icon="box">
+    ```json
+    { "message": "Wallets retrieved successfully", "code": 200, "data": { } }
+    ```
+
+    `data` is `null` — not absent — when there is nothing to return. Errors drop `data`; validation failures add `validationErrors`. See [Errors](/guides/errors).
+  </Accordion>
+
+  <Accordion title="Missing resources return 400" icon="magnifying-glass">
+    Existence is checked during request validation, so an unknown wallet reference or transaction hash surfaces as a field-level `400`, not a `404`.
+  </Accordion>
+
+  <Accordion title="Amounts are in whole units" icon="coins">
+    `100` means 100 USDT, never 100000000 base units. `coinDecimals` from `GET /networks` is informational only.
+  </Accordion>
+
+  <Accordion title="Timestamps are ISO 8601 UTC" icon="clock">
+    `2026-08-07T14:22:31.000Z`. Large integers may serialize as strings — parse numerically.
+  </Accordion>
+
+  <Accordion title="Rate limited per IP" icon="gauge-high">
+    60 requests per minute in production, shared across everything behind the same address. `429` responses do not use the standard envelope. See [Rate limits](/guides/rate-limits).
+  </Accordion>
+</AccordionGroup>
+
+## Endpoints
+
+### Networks
+
+| Method | Path | Scope | |
+| --- | --- | --- | --- |
+| `GET` | `/networks` | `read` | [List networks](/api-reference/networks/list-networks) |
+
+### Wallets
+
+| Method | Path | Scope | |
+| --- | --- | --- | --- |
+| `POST` | `/wallets` | `read_write` | [Create wallet](/api-reference/wallets/create-wallet) |
+| `GET` | `/wallets` | `read` | [List wallets](/api-reference/wallets/list-wallets) |
+| `GET` | `/wallets/{walletReference}` | `read` | [Get wallet](/api-reference/wallets/get-wallet) |
+| `PATCH` | `/wallets/{walletReference}` | `read_write` | [Update status](/api-reference/wallets/update-wallet) |
+| `GET` | `/wallets/{walletReference}/balances` | `read` | [Get balances](/api-reference/wallets/get-balances) |
+| `GET` | `/wallets/{walletReference}/transactions` | `read` | [Wallet transactions](/api-reference/wallets/list-wallet-transactions) |
+
+### Transfers
+
+| Method | Path | Scope | |
+| --- | --- | --- | --- |
+| `POST` | `/transfers/quote` | `read` | [Quote a transfer](/api-reference/transfers/quote-transfer) |
+| `POST` | `/transfers` | `read_write` | [Send a transfer](/api-reference/transfers/send-transfer) |
+| `GET` | `/transfers/{txHash}` | `read` | [Get transfer](/api-reference/transfers/get-transfer) |
+
+### Transactions
+
+| Method | Path | Scope | |
+| --- | --- | --- | --- |
+| `GET` | `/transactions` | `read` | [List transactions](/api-reference/transactions/list-transactions) |
+
+### Webhooks
+
+| Method | Path | Scope | |
+| --- | --- | --- | --- |
+| `POST` | `/webhooks/subscriptions` | `read_write` | [Create subscription](/api-reference/webhooks/create-subscription) |
+| `GET` | `/webhooks/subscriptions` | `read` | [List subscriptions](/api-reference/webhooks/list-subscriptions) |
+| `DELETE` | `/webhooks/subscriptions/{subscriptionId}` | `read_write` | [Delete subscription](/api-reference/webhooks/delete-subscription) |
+| `POST` | `/webhooks/subscriptions/{subscriptionId}/rotate-secret` | `read_write` | [Rotate secret](/api-reference/webhooks/rotate-secret) |
+
+## OpenAPI specification
+
+The full spec is published at [`/openapi.yaml`](/openapi.yaml). Import it into Postman, Insomnia, or a code generator:
+
+```bash
+curl -O https://your-docs-domain.com/openapi.yaml
+npx @openapitools/openapi-generator-cli generate -i openapi.yaml -g typescript-fetch -o ./traycer-client
+```
+
+It also declares the two outbound webhook events, so generators that support OpenAPI 3.1 `webhooks` will produce types for your event handler as well.

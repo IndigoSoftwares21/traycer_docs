@@ -1,0 +1,65 @@
+---
+title: "Create subscription"
+description: "Register a URL to receive deposit and withdrawal events."
+openapi: "POST /webhooks/subscriptions"
+---
+
+<Note>
+  Requires a `read_write` scope key.
+</Note>
+
+Registers an endpoint for `transaction.deposit` and `transaction.withdrawal` events.
+
+## Rules
+
+<CardGroup cols={2}>
+  <Card title="One subscription per URL" icon="link">
+    Registering the same URL twice returns `400`. You may register several distinct URLs.
+  </Card>
+  <Card title="Everything gets everything" icon="share-nodes">
+    Every active subscription receives every event. There is no per-event or per-wallet filtering.
+  </Card>
+  <Card title="Secret is 8–255 characters" icon="key">
+    Use a long random string. It is the only thing standing between your handler and a forged deposit.
+  </Card>
+  <Card title="Secret is never returned" icon="eye-slash">
+    Not by this endpoint, not by the list endpoint. Store it when you set it.
+  </Card>
+</CardGroup>
+
+## The secret signs every delivery
+
+Deliveries carry `X-Traycer-Signature: sha256=<hmac>` — an HMAC-SHA256 of the raw request body, keyed with this secret.
+
+<Warning>
+  **Verify it on every delivery.** Your webhook URL is not a secret; it appears in logs, proxies, and browser history. Without verification, anyone who learns the URL can post a fake `transaction.deposit` and credit an account that was never funded.
+
+  [Webhooks](/guides/webhooks) has verification code for Node, Python, and Go — including the constant-time comparison you must use.
+</Warning>
+
+## Delivery semantics, briefly
+
+- Attempted **once**. No automatic retry.
+- 10 second timeout; a slow handler is logged as a failure.
+- Any `2xx` counts as success.
+
+Reconcile against [`GET /transactions`](/api-reference/transactions/list-transactions) for anything that matters — a missed delivery is gone permanently.
+
+## Errors
+
+| `path` | `message` |
+| --- | --- |
+| `webhookUrl` | `Must be a valid URL` |
+| `webhookUrl` | `A webhook subscription for this URL already exists` |
+| `webhookSecret` | `Signing secret must be at least 8 characters long` |
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    Payload shape, verification, and handler design.
+  </Card>
+  <Card title="Rotate secret" icon="rotate" href="/api-reference/webhooks/rotate-secret">
+    Replace the signing secret later.
+  </Card>
+</CardGroup>

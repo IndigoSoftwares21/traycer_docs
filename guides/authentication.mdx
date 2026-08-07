@@ -1,0 +1,259 @@
+---
+title: "Authentication"
+description: "API keys, scopes, IP allowlists, expiry, and rotating without downtime."
+icon: "key"
+---
+
+Every request carries an API key in the `x-api-key` header. There is no OAuth flow, no session token, and no organization ID to send — the key identifies your organization by itself.
+
+```bash
+curl $BASE/wallets \
+  -H "x-api-key: trc_live_a1b2c3d4_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c"
+```
+
+<Warning>
+  **The key is a bearer credential that can move funds.** Anyone who holds it can send everything in your wallets to an address they control, and blockchain transfers cannot be reversed.
+
+  Keep it server-side. Never ship it in a mobile app, a browser bundle, or a public repository. If it is ever exposed, create a replacement and delete the old key immediately.
+</Warning>
+
+## Key format
+
+Keys look like this:
+
+```
+trc_live_a1b2c3d4_9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c
+└──────┬───────┘ └──────────────┬──────────────┘
+     prefix                  secret
+```
+
+The prefix is everything before the **last** underscore. The server looks up the key by prefix, then verifies the secret against a stored hash.
+
+Keys are created in the dashboard and displayed **once**, at creation. Only the hash is stored, so a lost key cannot be recovered — it can only be replaced.
+
+## Scopes
+
+Each key carries one of two scopes.
+
+| Scope | What it can do |
+| --- | --- |
+| `read` | Read networks, wallets, balances, transactions, and webhook subscriptions. Can also call `POST /transfers/quote`. |
+| `read_write` | Everything above, plus creating wallets, changing wallet status, broadcasting transfers, and managing webhook subscriptions. |
+
+<Note>
+  `POST /transfers/quote` is a `POST` but needs only `read`. Scope is declared per route rather than inferred from the HTTP method, and quoting calculates a fee without moving anything — so read-only services can price transfers safely.
+</Note>
+
+A `read` key hitting a write endpoint gets:
+
+```json 403
+{
+  "message": "Insufficient permissions. API Key has read-only access.",
+  "code": 403
+}
+```
+
+**Use `read` wherever you can.** An analytics job, a support dashboard, a reconciliation script — none of these need the ability to send funds, and a leaked read-only key cannot drain a wallet.
+
+### Which endpoints need which scope
+
+<Columns cols={2}>
+  <Card title="read" icon="eye">
+    `GET /networks` · `GET /wallets` · `GET /wallets/{ref}` · `GET /wallets/{ref}/balances` · `GET /wallets/{ref}/transactions` · `POST /transfers/quote` · `GET /transfers/{txHash}` · `GET /transactions` · `GET /webhooks/subscriptions`
+  </Card>
+  <Card title="read_write" icon="pen">
+    `POST /wallets` · `PATCH /wallets/{ref}` · `POST /transfers` · `POST /webhooks/subscriptions` · `DELETE /webhooks/subscriptions/{id}` · `POST /webhooks/subscriptions/{id}/rotate-secret`
+  </Card>
+</Columns>
+
+## IP allowlisting
+
+A key can be restricted to a set of IP addresses or CIDR ranges. Requests from anywhere else are rejected with `403`, even when the key itself is valid:
+
+```json 403
+{
+  "message": "IP address 203.0.113.42 is not whitelisted for this API key",
+  "code": 403
+}
+```
+
+An empty allowlist means every address is permitted. Set one on production keys — it turns a leaked key from a catastrophe into an inconvenience, because the attacker also has to be calling from your infrastructure.
+
+<Tip>
+  The check uses the client IP as seen by the server, which trusts standard proxy headers. If you sit behind a load balancer or CDN, allowlist the addresses your egress traffic actually leaves from, not your users' addresses.
+</Tip>
+
+## Expiry
+
+A key can carry an expiry date. Once it passes, every request fails:
+
+```json 401
+{ "message": "API Key has expired", "code": 401 }
+```
+
+Expiry is checked before the secret is verified, so an expired key reports expiry rather than an invalid secret. Nothing warns you in advance — put the expiry date in your own calendar.
+
+## Error reference
+
+Every authentication failure returns the standard envelope with no `data`.
+
+| Status | Message | Cause |
+| --- | --- | --- |
+| `401` | `Missing x-api-key header` | Header absent or not a string. |
+| `401` | `Invalid API Key format` | Not in `prefix_secret` shape — no underscore to split on. |
+| `401` | `Invalid API Key prefix or key not found` | No key matches that prefix. Typo, wrong environment, or the key was deleted. |
+| `401` | `API Key has expired` | Past its expiry date. |
+| `401` | `Invalid API Key secret` | Prefix matched an existing key, but the secret did not. |
+| `403` | `IP address … is not whitelisted for this API key` | Valid key, disallowed source address. |
+| `403` | `Insufficient permissions. API Key has read-only access.` | A `read` key on a write endpoint. |
+
+<Note>
+  Traycer does not distinguish "no such key" from "wrong secret" in a way that helps an attacker enumerate keys — the prefix lookup and the secret comparison are separate failures, but both return `401` with no hint about which organization a prefix belongs to.
+</Note>
+
+## Rotating a key
+
+Keys are independent of one another. Deleting one has no effect on wallets, balances, in-flight transfers, or webhook subscriptions — it only stops that credential from authenticating.
+
+<Steps>
+  <Step title="Create the replacement">
+    Generate a new key in the dashboard with the same scope and IP allowlist. Copy the secret now; you will not see it again.
+  </Step>
+  <Step title="Deploy it">
+    Roll the new value out to every service that authenticates. Both keys work simultaneously, so there is no window where requests fail.
+  </Step>
+  <Step title="Confirm nothing is using the old one">
+    Watch the old key's last-used timestamp in the dashboard. Wait until it stops advancing — that is your proof no forgotten cron job still depends on it.
+  </Step>
+  <Step title="Delete the old key">
+    Requests presenting it now fail with `Invalid API Key prefix or key not found`.
+  </Step>
+</Steps>
+
+<Warning>
+  If a key has actually leaked, skip the graceful sequence and delete it first. A few minutes of failing requests is cheaper than a drained wallet.
+</Warning>
+
+## A minimal client
+
+Centralize the header so no call site can forget it, and read the envelope in one place.
+
+<CodeGroup>
+
+```javascript Node.js
+class TraycerError extends Error {
+    constructor({ message, code, validationErrors }) {
+        super(message);
+        this.code = code;
+        this.validationErrors = validationErrors;
+    }
+}
+
+export const traycer = async (path, { method = "GET", body, headers } = {}) => {
+    const res = await fetch(`${process.env.TRAYCER_BASE_URL}${path}`, {
+        method,
+        headers: {
+            "x-api-key": process.env.TRAYCER_API_KEY,
+            "Content-Type": "application/json",
+            ...headers,
+        },
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const payload = await res.json();
+    if (!res.ok) throw new TraycerError(payload);
+    return payload.data;
+};
+```
+
+```python Python
+import os
+import requests
+
+
+class TraycerError(Exception):
+    def __init__(self, payload):
+        super().__init__(payload.get("message"))
+        self.code = payload.get("code")
+        self.validation_errors = payload.get("validationErrors")
+
+
+def traycer(path, method="GET", body=None, headers=None):
+    res = requests.request(
+        method,
+        f"{os.environ['TRAYCER_BASE_URL']}{path}",
+        headers={"x-api-key": os.environ["TRAYCER_API_KEY"], **(headers or {})},
+        json=body,
+    )
+
+    payload = res.json()
+    if not res.ok:
+        raise TraycerError(payload)
+
+    return payload["data"]
+```
+
+```go Go
+package traycer
+
+import (
+    "bytes"
+    "encoding/json"
+    "fmt"
+    "net/http"
+    "os"
+)
+
+type Envelope struct {
+    Message string          `json:"message"`
+    Code    int             `json:"code"`
+    Data    json.RawMessage `json:"data"`
+}
+
+func Call(method, path string, body any) (json.RawMessage, error) {
+    var buf bytes.Buffer
+    if body != nil {
+        if err := json.NewEncoder(&buf).Encode(body); err != nil {
+            return nil, err
+        }
+    }
+
+    req, err := http.NewRequest(method, os.Getenv("TRAYCER_BASE_URL")+path, &buf)
+    if err != nil {
+        return nil, err
+    }
+
+    req.Header.Set("x-api-key", os.Getenv("TRAYCER_API_KEY"))
+    req.Header.Set("Content-Type", "application/json")
+
+    res, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer res.Body.Close()
+
+    var env Envelope
+    if err := json.NewDecoder(res.Body).Decode(&env); err != nil {
+        return nil, err
+    }
+
+    if res.StatusCode >= 400 {
+        return nil, fmt.Errorf("traycer %d: %s", env.Code, env.Message)
+    }
+
+    return env.Data, nil
+}
+```
+
+</CodeGroup>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Errors" icon="triangle-exclamation" href="/guides/errors">
+    The full envelope and status code reference.
+  </Card>
+  <Card title="Rate limits" icon="gauge-high" href="/guides/rate-limits">
+    What happens at 60 requests per minute.
+  </Card>
+</CardGroup>

@@ -1,72 +1,129 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
-  "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
+    "$schema": "https://mintlify.com/docs.json",
+    "theme": "mint",
+    "name": "Traycer",
+    "colors": {
+        "primary": "#B85042",
+        "light": "#E07A6B",
+        "dark": "#8A3C32"
+    },
+    "favicon": "/favicon.svg",
+    "logo": {
+        "light": "/logo/light.svg",
+        "dark": "/logo/dark.svg"
+    },
+    "api": {
+        "playground": {
+            "display": "interactive"
         },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
+        "examples": {
+            "languages": ["curl", "javascript", "python", "go", "php"]
         }
-      ]
+    },
+    "navigation": {
+        "tabs": [
+            {
+                "tab": "Documentation",
+                "groups": [
+                    {
+                        "group": "Get started",
+                        "pages": [
+                            "index",
+                            "guides/quickstart",
+                            "guides/authentication"
+                        ]
+                    },
+                    {
+                        "group": "Core concepts",
+                        "pages": [
+                            "guides/wallets",
+                            "guides/networks-and-assets",
+                            "guides/transfers",
+                            "guides/idempotency",
+                            "guides/webhooks"
+                        ]
+                    },
+                    {
+                        "group": "Working with the API",
+                        "pages": [
+                            "guides/errors",
+                            "guides/pagination",
+                            "guides/rate-limits",
+                            "guides/going-live"
+                        ]
+                    }
+                ]
+            },
+            {
+                "tab": "API Reference",
+                "openapi": "openapi.yaml",
+                "groups": [
+                    {
+                        "group": "Overview",
+                        "pages": ["api-reference/introduction"]
+                    },
+                    {
+                        "group": "Networks",
+                        "pages": ["api-reference/networks/list-networks"]
+                    },
+                    {
+                        "group": "Wallets",
+                        "pages": [
+                            "api-reference/wallets/create-wallet",
+                            "api-reference/wallets/list-wallets",
+                            "api-reference/wallets/get-wallet",
+                            "api-reference/wallets/update-wallet",
+                            "api-reference/wallets/get-balances",
+                            "api-reference/wallets/list-wallet-transactions"
+                        ]
+                    },
+                    {
+                        "group": "Transfers",
+                        "pages": [
+                            "api-reference/transfers/quote-transfer",
+                            "api-reference/transfers/send-transfer",
+                            "api-reference/transfers/get-transfer"
+                        ]
+                    },
+                    {
+                        "group": "Transactions",
+                        "pages": ["api-reference/transactions/list-transactions"]
+                    },
+                    {
+                        "group": "Webhooks",
+                        "pages": [
+                            "api-reference/webhooks/create-subscription",
+                            "api-reference/webhooks/list-subscriptions",
+                            "api-reference/webhooks/delete-subscription",
+                            "api-reference/webhooks/rotate-secret"
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "navbar": {
+        "primary": {
+            "type": "button",
+            "label": "Dashboard",
+            "href": "https://dashboard.traycer.com"
+        }
+    },
+    "footer": {
+        "socials": {
+            "github": "https://github.com/IndigoSoftwares21"
+        }
+    },
+    "contextual": {
+        "options": [
+            "copy",
+            "view",
+            "chatgpt",
+            "claude",
+            "perplexity",
+            "mcp",
+            "cursor",
+            "vscode"
+        ]
     }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
-  }
 }

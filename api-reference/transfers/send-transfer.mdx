@@ -1,0 +1,108 @@
+---
+title: "Send a transfer"
+description: "Sign and broadcast a transaction from one of your wallets."
+openapi: "POST /transfers"
+---
+
+<Note>
+  Requires a `read_write` scope key. Same body as [Quote a transfer](/api-reference/transfers/quote-transfer).
+</Note>
+
+<Warning>
+  **This is irreversible.** A `201` means the transaction was accepted by the network — not that it is confirmed, and not that it can be recalled. Nothing you send afterwards will undo it.
+</Warning>
+
+## Always send an Idempotency-Key
+
+The header is optional in the protocol and mandatory in a correct integration. Without it, a request that times out leaves you unable to distinguish "never sent" from "sent, response lost" — and retrying to find out is how people pay twice.
+
+```bash
+-H "Idempotency-Key: 8f14e45f-ea0c-4b21-9f6b-2f8a6d3c1e70"
+```
+
+| Situation | Result |
+| --- | --- |
+| First use | The transfer runs. |
+| Retry after success, same body | The original response is replayed. **No second transfer.** |
+| Retry while the first is still running | `409` — wait, then retry the same key. |
+| Same key, different body | `422` — keys cannot be recycled. A bug, not a transient error. |
+| The transfer failed | The claim is released, so a corrected retry under the same key works normally. |
+
+Generate one key per logical transfer, persist it alongside your payout record, and reuse it for every attempt. See [Idempotency](/guides/idempotency).
+
+## What happens before broadcasting
+
+<Steps>
+  <Step title="Validation">
+    Network active, asset active on that network, wallet exists and is yours, wallet `active`, address valid for the network, amount positive.
+  </Step>
+  <Step title="Idempotency claim">
+    If you supplied a key, it is claimed here — replaying, `409`, or `422` as above.
+  </Step>
+  <Step title="Live balance and fee re-check">
+    Balances are re-read from the chain and re-quoted. Insufficient funds fail here.
+  </Step>
+  <Step title="Sign and broadcast">
+    Only now is the private key decrypted and the transaction submitted.
+  </Step>
+</Steps>
+
+If any step fails, nothing was broadcast and the idempotency claim is released.
+
+## Two different 400 shapes
+
+Validation failures carry `validationErrors`:
+
+```json
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    { "path": ["fromWalletReference"], "message": "Sender wallet is currently inactive" }
+  ]
+}
+```
+
+The balance re-check at step 3 returns a plain message — it is not a field-level problem:
+
+```json
+{
+  "message": "Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.",
+  "code": 400
+}
+```
+
+Check for `validationErrors` before assuming it is present.
+
+## A 500 means "unknown", not "failed"
+
+<Warning>
+  A `500` or a timeout does **not** mean the transfer did not happen. It may have been broadcast before the response was lost.
+
+  Retry with the **same** `Idempotency-Key` — never a fresh one — or check [`GET /transactions`](/api-reference/transactions/list-transactions) before taking any other action.
+</Warning>
+
+## After it returns
+
+`txId` in the response is the **on-chain transaction hash**. Store it.
+
+<Warning>
+  Confusing pair: here `txId` is the on-chain hash. In [Get transfer](/api-reference/transfers/get-transfer), `txId` is Traycer's internal row ID and the on-chain hash is `txHash`. Match this `txId` against `txHash` on lookup.
+</Warning>
+
+The transaction is not immediately queryable — the poller must index its block first. `GET /transfers/{txHash}` returns `400` until then, which is expected rather than evidence of failure. Record the hash as pending in your own system and let the `transaction.withdrawal` webhook confirm it.
+
+<Note>
+  **Indexing currently runs on Tron only.** Transfers on Ethereum, BSC, and Bitcoin broadcast normally and return a `txId`, but they never appear in `GET /transactions` and fire no webhooks. Track those against a block explorer or your own node.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Idempotency" icon="shield-check" href="/guides/idempotency">
+    Retry semantics in full.
+  </Card>
+  <Card title="Transfers" icon="book" href="/guides/transfers">
+    Production-shaped payout code covering every failure mode.
+  </Card>
+</CardGroup>

@@ -1,0 +1,39 @@
+---
+title: "Delete subscription"
+description: "Permanently stop deliveries to a webhook endpoint."
+openapi: "DELETE /webhooks/subscriptions/{subscriptionId}"
+---
+
+<Note>
+  Requires a `read_write` scope key.
+</Note>
+
+Removes the subscription. Deliveries to that URL stop immediately; past delivery logs are retained.
+
+<Warning>
+  There is no undo and no soft delete. To resume deliveries you must register the URL again — with a **new secret**, since the old one is gone with the subscription.
+</Warning>
+
+The `subscriptionId` comes from the [create](/api-reference/webhooks/create-subscription) or [list](/api-reference/webhooks/list-subscriptions) response.
+
+## Errors
+
+Both `400` with `validationErrors`:
+
+| `message` | Cause |
+| --- | --- |
+| `subscriptionId must be a valid UUID` | Malformed identifier — checked before any lookup. |
+| `Webhook subscription not found or does not belong to this organization` | No such subscription in your organization. |
+
+Deleting an already-deleted subscription returns the second message. It is not idempotent in the sense of returning `200` twice.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="List subscriptions" icon="list" href="/api-reference/webhooks/list-subscriptions">
+    Find the ID to delete.
+  </Card>
+  <Card title="Rotate secret" icon="rotate" href="/api-reference/webhooks/rotate-secret">
+    Replace a compromised secret without dropping the subscription.
+  </Card>
+</CardGroup>

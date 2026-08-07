@@ -1,0 +1,53 @@
+---
+title: "Update wallet status"
+description: "Freeze or re-enable outgoing transfers for a wallet."
+openapi: "PATCH /wallets/{walletReference}"
+---
+
+<Note>
+  Requires a `read_write` scope key.
+</Note>
+
+Sets `walletStatus` to `active` or `inactive`. It is the only mutable field on a wallet.
+
+## What inactive actually does
+
+<Warning>
+  **Deactivating does not stop deposits.** The address still exists on-chain and anyone can still send to it. Incoming funds are still detected, still recorded, and still fire webhooks.
+
+  What changes: outgoing transfers are refused. Both `POST /transfers` and `POST /transfers/quote` reject the wallet with `Sender wallet is currently inactive`.
+</Warning>
+
+Use it to freeze an account under investigation, or to retire a wallet you no longer want paying out. It is not a way to close an address — addresses are permanent.
+
+## The response shape differs
+
+This endpoint returns the stored database record rather than the enriched wallet object the other endpoints return:
+
+| | Other wallet endpoints | This endpoint |
+| --- | --- | --- |
+| `walletId`, `organizationId` | absent | **present** |
+| `network` | present | absent |
+| `coins` | present | absent |
+
+If you cache wallet objects, do not overwrite a cached entry with this response — you will lose `network` and `coins`. Re-fetch with [Get wallet](/api-reference/wallets/get-wallet) instead.
+
+## Errors
+
+| Message | Cause |
+| --- | --- |
+| `Wallet not found or does not belong to this organization` | Unknown reference. Returned as `400`, not `404`. |
+| `Status must be 'active' or 'inactive'` | Any other value, including `"ACTIVE"` — the check is case-sensitive. |
+
+Setting the status it already has is accepted and returns `200`.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Wallets" icon="wallet" href="/guides/wallets">
+    The full lifecycle, including what status does and does not affect.
+  </Card>
+  <Card title="Send a transfer" icon="paper-plane" href="/api-reference/transfers/send-transfer">
+    What an inactive wallet blocks.
+  </Card>
+</CardGroup>

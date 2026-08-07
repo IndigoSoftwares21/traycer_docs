@@ -1,0 +1,63 @@
+# Traycer HTTP API
+
+> Traycer provisions blockchain wallets on Bitcoin, Ethereum, BSC, and Tron for your users, reads live on-chain balances, prices and broadcasts transfers, and pushes webhook events when funds move. Every wallet is addressed by an identifier you choose (`walletReference`), so you never store Traycer identifiers.
+
+Base URL: `https://your-domain.com/api/v1/http` (placeholder — substitute your deployed host). Local default: `http://localhost:6969/api/v1/http`.
+
+Authentication: `x-api-key: trc_live_<prefix>_<secret>` on every request. Keys are scoped `read` or `read_write`.
+
+Response envelope, on success and failure alike: `{ "message": string, "code": number, "data": object|null }`. Validation failures add `validationErrors: [{ path, message }]`.
+
+Critical facts an integrator must know:
+- Token transfers are paid for in the chain's native currency. A wallet holding only USDT cannot send USDT — it needs TRX/ETH/BNB for gas. Always call `POST /transfers/quote` first and read `isSufficient`.
+- `POST /transfers` returning `201` means **broadcast**, not confirmed, and blockchain transfers are irreversible.
+- Send an `Idempotency-Key` header on `POST /transfers`. A retry with the same key replays the original response instead of sending twice.
+- Missing resources return `400` with a validation error, not `404` — existence is checked during request validation.
+- Webhooks are delivered **once**, with no retry, and time out after 10 seconds. Reconcile against `GET /transactions`.
+- Deposit/withdrawal indexing currently runs on **Tron only**. Other chains support wallets, balances, quotes, and sends, but their transactions are not indexed and fire no webhooks.
+- Rate limit in production: 60 requests per minute per IP. `429` responses do not use the standard envelope.
+
+## Getting started
+
+- [Introduction](/index.mdx): What the API does, how the pieces fit together, and every endpoint at a glance.
+- [Quickstart](/guides/quickstart.mdx): Wallet to completed payout in five requests, with Node and Python versions.
+- [Authentication](/guides/authentication.mdx): Key format, `read` vs `read_write` scopes, IP allowlisting, expiry, rotation, and the full auth error table.
+
+## Core concepts
+
+- [Wallets](/guides/wallets.mdx): `walletReference` rules, the `network` vs `walletChain` distinction, active/inactive status, and private key handling.
+- [Networks and assets](/guides/networks-and-assets.mdx): Supported chains and tokens, the gas rule, per-chain fee mechanics, balance keys per network, and mainnet vs testnet chain IDs.
+- [Transfers](/guides/transfers.mdx): The quote-then-send flow, what happens before broadcasting, every rejection case, and how a broadcast becomes a ledger row.
+- [Idempotency](/guides/idempotency.mdx): The four outcomes of an `Idempotency-Key`, how to choose keys, and a correct retry loop.
+- [Webhooks](/guides/webhooks.mdx): Event payloads, HMAC-SHA256 signature verification in Node/Python/Go, delivery semantics, and reconciliation.
+
+## Working with the API
+
+- [Responses and errors](/guides/errors.mdx): The envelope, every status code, common validation messages, and a typed client.
+- [Pagination and filtering](/guides/pagination.mdx): Offset pagination, per-endpoint filters, and the differing row keys and field names between the two transaction endpoints.
+- [Rate limits](/guides/rate-limits.mdx): 60 req/min per IP, the non-standard `429` body, and how to stay under it.
+- [Going live](/guides/going-live.mdx): Pre-launch checklist covering mainnet verification, credential hygiene, gas funding, reconciliation, and known limitations.
+
+## API reference
+
+- [API reference overview](/api-reference/introduction.mdx): Base URL, conventions, and the endpoint index.
+- [List networks](/api-reference/networks/list-networks.mdx): `GET /networks` — active networks and their coins. Scope `read`.
+- [Create wallet](/api-reference/wallets/create-wallet.mdx): `POST /wallets` — provision an address. Scope `read_write`.
+- [List wallets](/api-reference/wallets/list-wallets.mdx): `GET /wallets` — paginated, with search/network/status filters. Scope `read`.
+- [Get wallet](/api-reference/wallets/get-wallet.mdx): `GET /wallets/{walletReference}`. Scope `read`.
+- [Update wallet status](/api-reference/wallets/update-wallet.mdx): `PATCH /wallets/{walletReference}` — active/inactive. Scope `read_write`.
+- [Get balances](/api-reference/wallets/get-balances.mdx): `GET /wallets/{walletReference}/balances` — live from chain. Scope `read`.
+- [List wallet transactions](/api-reference/wallets/list-wallet-transactions.mdx): `GET /wallets/{walletReference}/transactions`. Scope `read`.
+- [Quote a transfer](/api-reference/transfers/quote-transfer.mdx): `POST /transfers/quote` — fee estimate and sufficiency check. Scope `read`.
+- [Send a transfer](/api-reference/transfers/send-transfer.mdx): `POST /transfers` — sign and broadcast. Scope `read_write`.
+- [Get transfer](/api-reference/transfers/get-transfer.mdx): `GET /transfers/{txHash}`. Scope `read`.
+- [List transactions](/api-reference/transactions/list-transactions.mdx): `GET /transactions` — organization-wide ledger. Scope `read`.
+- [Create subscription](/api-reference/webhooks/create-subscription.mdx): `POST /webhooks/subscriptions`. Scope `read_write`.
+- [List subscriptions](/api-reference/webhooks/list-subscriptions.mdx): `GET /webhooks/subscriptions`. Scope `read`.
+- [Delete subscription](/api-reference/webhooks/delete-subscription.mdx): `DELETE /webhooks/subscriptions/{subscriptionId}`. Scope `read_write`.
+- [Rotate signing secret](/api-reference/webhooks/rotate-secret.mdx): `POST /webhooks/subscriptions/{subscriptionId}/rotate-secret`. Scope `read_write`.
+
+## Optional
+
+- [OpenAPI specification](/openapi.yaml): OpenAPI 3.1 spec covering all 15 endpoints plus the two outbound webhook events.
+- [Complete context](/llms-full.txt): Every endpoint, field, error message, and behavioural detail in a single file.

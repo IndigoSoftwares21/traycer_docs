@@ -1,20 +1,121 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Traycer HTTP API"
+description: "Provision blockchain wallets for your users, read live balances, move funds, and get notified — over one HTTP API."
+mode: "wide"
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Traycer gives your application a wallet on Bitcoin, Ethereum, BSC, or Tron for every user you have, without you touching a private key, running a node, or building an indexer.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+Everything is addressed by an identifier **you** choose — your user ID, order number, account reference. Traycer stores the mapping; you store nothing of ours.
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+```bash Create a wallet for user 8842
+curl -X POST https://your-domain.com/api/v1/http/wallets \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "walletReference": "user_8842", "network": "tron" }'
+```
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/guides/quickstart" horizontal>
+    Wallet to payout in five requests.
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/introduction" horizontal>
+    All 15 endpoints, with a live playground.
+  </Card>
+</CardGroup>
+
+## What you can build
+
+<Columns cols={3}>
+  <Card title="Deposit addresses" icon="wallet" href="/guides/wallets">
+    A unique, permanent receiving address per user. Deposits are detected and pushed to you.
+  </Card>
+  <Card title="Payouts" icon="paper-plane" href="/guides/transfers">
+    Price a transfer, check the wallet can cover the gas, then broadcast it.
+  </Card>
+  <Card title="Reconciliation" icon="scale-balanced" href="/api-reference/transactions/list-transactions">
+    One ledger across every wallet, filterable by wallet, asset, type, and status.
+  </Card>
+</Columns>
+
+## How it fits together
+
+<Steps>
+  <Step title="Create a wallet" icon="plus">
+    `POST /wallets` with your own `walletReference` returns an address on the network you picked. It is live immediately.
+  </Step>
+  <Step title="Funds arrive" icon="arrow-down">
+    A background poller watches the chain. When it sees a transfer to one of your addresses it records the transaction and fires a `transaction.deposit` webhook.
+  </Step>
+  <Step title="Quote before you send" icon="calculator">
+    `POST /transfers/quote` estimates the network fee and tells you whether the wallet can actually cover it. Token transfers need native currency for gas — this is where you find out.
+  </Step>
+  <Step title="Send" icon="paper-plane">
+    `POST /transfers` signs and broadcasts. Pass an `Idempotency-Key` so a retry can never send twice.
+  </Step>
+  <Step title="Reconcile" icon="list-check">
+    `GET /transactions` is the source of truth. Webhooks are a fast path, not a guarantee.
+  </Step>
+</Steps>
+
+## Things worth knowing up front
+
+<AccordionGroup>
+  <Accordion title="You choose the identifiers" icon="fingerprint">
+    `walletReference` is yours — `user_8842`, `order_10023`, whatever your system already calls the thing. It must be unique within your organization and may contain only letters, digits, underscores, and hyphens. Every wallet endpoint is addressed by it, so you never persist a Traycer ID.
+  </Accordion>
+
+  <Accordion title="Token transfers need native currency for gas" icon="gas-pump">
+    A wallet holding 500 USDT and 0 TRX **cannot send USDT**. The fee is paid in TRX, and there is none. This is the single most common integration surprise, and [`POST /transfers/quote`](/api-reference/transfers/quote-transfer) exists to catch it before you broadcast. See [Networks and assets](/guides/networks-and-assets).
+  </Accordion>
+
+  <Accordion title="Your API key can move money" icon="key">
+    The key in `x-api-key` is a bearer credential — anyone holding it can send funds from your wallets. Keep it server-side, never in a browser bundle or mobile app, and scope it `read` wherever writing is not needed. See [Authentication](/guides/authentication).
+  </Accordion>
+
+  <Accordion title="Webhooks are delivered once, with no retry" icon="bell">
+    A delivery is attempted a single time and the outcome is logged either way. If your endpoint is down for thirty seconds you have missed those events permanently. Treat webhooks as the fast path and reconcile against [`GET /transactions`](/api-reference/transactions/list-transactions) for anything that matters. See [Webhooks](/guides/webhooks).
+  </Accordion>
+
+  <Accordion title="A 201 on a transfer means broadcast, not confirmed" icon="triangle-exclamation">
+    The transaction was accepted by the network. It can still fail, and it can never be reversed. Confirmation arrives via the `transaction.withdrawal` webhook or [`GET /transfers/{txHash}`](/api-reference/transfers/get-transfer).
+  </Accordion>
+</AccordionGroup>
+
+## Base URL
+
+<CodeGroup>
+
+```bash Production
+https://your-domain.com/api/v1/http
+```
+
+```bash Local
+http://localhost:6969/api/v1/http
+```
+
+</CodeGroup>
+
+<Note>
+  `your-domain.com` is a placeholder — substitute the host you deployed the API to. The `v1` segment comes from the server's `API_VERSION` setting and defaults to `v1`.
+</Note>
+
+## Every endpoint at a glance
+
+| Method | Path | Scope |
+| --- | --- | --- |
+| `GET` | [`/networks`](/api-reference/networks/list-networks) | `read` |
+| `POST` | [`/wallets`](/api-reference/wallets/create-wallet) | `read_write` |
+| `GET` | [`/wallets`](/api-reference/wallets/list-wallets) | `read` |
+| `GET` | [`/wallets/{walletReference}`](/api-reference/wallets/get-wallet) | `read` |
+| `PATCH` | [`/wallets/{walletReference}`](/api-reference/wallets/update-wallet) | `read_write` |
+| `GET` | [`/wallets/{walletReference}/balances`](/api-reference/wallets/get-balances) | `read` |
+| `GET` | [`/wallets/{walletReference}/transactions`](/api-reference/wallets/list-wallet-transactions) | `read` |
+| `POST` | [`/transfers/quote`](/api-reference/transfers/quote-transfer) | `read` |
+| `POST` | [`/transfers`](/api-reference/transfers/send-transfer) | `read_write` |
+| `GET` | [`/transfers/{txHash}`](/api-reference/transfers/get-transfer) | `read` |
+| `GET` | [`/transactions`](/api-reference/transactions/list-transactions) | `read` |
+| `POST` | [`/webhooks/subscriptions`](/api-reference/webhooks/create-subscription) | `read_write` |
+| `GET` | [`/webhooks/subscriptions`](/api-reference/webhooks/list-subscriptions) | `read` |
+| `DELETE` | [`/webhooks/subscriptions/{subscriptionId}`](/api-reference/webhooks/delete-subscription) | `read_write` |
+| `POST` | [`/webhooks/subscriptions/{subscriptionId}/rotate-secret`](/api-reference/webhooks/rotate-secret) | `read_write` |

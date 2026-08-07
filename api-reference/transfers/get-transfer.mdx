@@ -1,0 +1,60 @@
+---
+title: "Get transfer"
+description: "Look up one indexed transaction by its on-chain hash."
+openapi: "GET /transfers/{txHash}"
+---
+
+<Note>
+  Requires a `read` scope key.
+</Note>
+
+Returns the indexed transaction with that hash, scoped to your organization. Despite the name, it resolves deposits as well as withdrawals — it is a lookup by hash over the same ledger [`GET /transactions`](/api-reference/transactions/list-transactions) pages through.
+
+## A fresh broadcast is not immediately findable
+
+<Warning>
+  A `txId` returned by [Send a transfer](/api-reference/transfers/send-transfer) is not queryable here until the poller has indexed the containing block. Until then you get:
+
+  ```json
+  {
+    "message": "Validation failed",
+    "code": 400,
+    "validationErrors": [
+      { "path": ["txHash"], "message": "Transaction not found or does not belong to this organization" }
+    ]
+  }
+  ```
+
+  That is expected. It is **not** evidence that the transfer failed.
+</Warning>
+
+The poller runs every 10 seconds and stays 3 confirmations behind the chain head, so expect a delay of at least that.
+
+<Tip>
+  Do not poll this in a tight loop after broadcasting. Record the hash as pending in your own system, let the `transaction.withdrawal` webhook flip it to confirmed, and use a slower reconciliation sweep over `GET /transactions` as the backstop. See [Webhooks](/guides/webhooks).
+</Tip>
+
+## txId means something different here
+
+<Warning>
+  In the **send** response, `txId` is the on-chain hash. In **this** response, `txId` is Traycer's internal row identifier and the on-chain hash is `txHash`.
+
+  Match a send's `txId` against this endpoint's `txHash`.
+</Warning>
+
+## Indexing coverage
+
+<Note>
+  **Currently Tron only.** Transactions on Ethereum, BSC, and Bitcoin are not indexed, so this endpoint will never resolve their hashes even when the transfer succeeded on-chain.
+</Note>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="List transactions" icon="list-check" href="/api-reference/transactions/list-transactions">
+    Search by hash, address, wallet, asset, type, or status.
+  </Card>
+  <Card title="Transfers" icon="book" href="/guides/transfers">
+    How a broadcast becomes a ledger row.
+  </Card>
+</CardGroup>

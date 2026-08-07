@@ -1,0 +1,162 @@
+---
+title: "Going live"
+description: "A checklist for the day you point this at real money."
+icon: "circle-check"
+---
+
+Everything below is something that has surprised somebody. Work through it before your first mainnet payout.
+
+## Confirm you are actually on mainnet
+
+Create a throwaway wallet and read `walletChain`:
+
+```bash
+curl -X POST $BASE/wallets \
+  -H "x-api-key: $TRAYCER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "walletReference": "preflight_check_1", "network": "tron" }'
+```
+
+It must say `tron_mainnet`. `tron_nile`, `ethereum_sepolia`, `bsc_testnet`, or `bitcoin_testnet` mean you are pointed at a test chain, where funds have no value and addresses are not interchangeable with mainnet ones.
+
+The environment is chosen by the server, not per request, so this is a deployment configuration question — not something you can override from your side.
+
+<Warning>
+  Never migrate testnet wallet references into production expecting the addresses to carry over. They will not. Provision fresh wallets against the production deployment.
+</Warning>
+
+## Lock down credentials
+
+<Steps>
+  <Step title="Separate keys per environment and per service" icon="key">
+    Staging and production must not share a key. A payout worker and an analytics job should not share one either — when you have to revoke, you want to revoke one thing.
+  </Step>
+  <Step title="Scope everything down" icon="eye">
+    Only the service that broadcasts transfers needs `read_write`. Dashboards, exports, reconciliation, and support tooling all work with `read`. See [Authentication](/guides/authentication).
+  </Step>
+  <Step title="Set an IP allowlist" icon="shield">
+    Restrict production keys to your egress addresses. This converts a leaked key from a drained wallet into a rejected request.
+  </Step>
+  <Step title="Keep keys out of the client" icon="mobile">
+    No mobile app, no browser bundle, no repository. The key can move funds; treat it like a signing key, because that is effectively what it is.
+  </Step>
+  <Step title="Write down expiry dates" icon="calendar">
+    Nothing warns you before a key expires. Put the date somewhere that pages a human.
+  </Step>
+</Steps>
+
+## Make transfers safe to retry
+
+<Warning>
+  If you ship one thing from these docs, ship this: **every `POST /transfers` carries an `Idempotency-Key`, persisted alongside your payout record, reused on every retry.**
+
+  Without it, a timeout leaves you unable to distinguish "not sent" from "sent, response lost" — and blockchain transfers cannot be reversed. See [Idempotency](/guides/idempotency).
+</Warning>
+
+Check your error handling maps each case to a distinct state:
+
+| Response | State | Next action |
+| --- | --- | --- |
+| `201` | broadcast | Store `txId`, wait for confirmation. |
+| `400` | rejected | Nothing was sent. Surface the reason. |
+| `409` | in flight | Retry the same key after a delay. |
+| `422` | key reuse bug | Alert. Do not retry. |
+| `429` | throttled | Back off, retry the same key. |
+| `500` / timeout | **unknown** | Retry the same key, or reconcile. Never generate a new key. |
+
+## Fund gas before you need it
+
+A wallet that will ever send tokens needs native currency. Decide now where that comes from:
+
+- A top-up step in your payout flow, triggered when a quote reports a gas shortfall.
+- A scheduled sweep that keeps every active wallet above a floor.
+- A single funding wallet that tops up others on demand.
+
+Whichever you pick, alert on it. "Payout blocked: insufficient gas" should reach a human, not just a log line. See [Networks and assets](/guides/networks-and-assets).
+
+## Do not trust webhooks alone
+
+<Warning>
+  Deliveries are attempted **once**, with no retry, and time out after 10 seconds. A deploy, a brief outage, or a slow handler means those events are gone permanently.
+</Warning>
+
+Before launch you need:
+
+<CardGroup cols={2}>
+  <Card title="Signature verification" icon="lock">
+    Constant-time HMAC comparison over the raw body. An unverified handler is an open endpoint for crediting fake deposits.
+  </Card>
+  <Card title="Fast acknowledgement" icon="bolt">
+    Verify, respond `200`, then process asynchronously. Not the other way round.
+  </Card>
+  <Card title="Deduplication" icon="copy">
+    Key your processing on `txHash` + `txType`. Your reconciliation sweep will re-deliver the same transactions by design.
+  </Card>
+  <Card title="A reconciliation job" icon="rotate">
+    Periodically sweep [`GET /transactions`](/api-reference/transactions/list-transactions) for anything the webhook handler never saw. This is what makes missed deliveries survivable.
+  </Card>
+</CardGroup>
+
+Test the failure path explicitly: stop your handler, generate a real deposit, restart, and confirm reconciliation picks it up. If it does not, you have not finished.
+
+## Know the current limitations
+
+<AccordionGroup>
+  <Accordion title="Indexing runs on Tron only" icon="triangle-exclamation">
+    The deposit poller currently scans Tron. Wallets, balances, quotes, and transfers all work on Ethereum, BSC, and Bitcoin — but transactions on those chains are not indexed, so they do not appear in `GET /transactions` or `GET /transfers/{txHash}`, and no webhooks fire for them.
+
+    If you launch on those chains, track the `txId` returned by `POST /transfers` against a block explorer or your own node, and do not build a flow that waits on a webhook that will not arrive.
+  </Accordion>
+
+  <Accordion title="Indexing lags the chain by design" icon="clock">
+    The poller runs every 10 seconds and stays 3 confirmations behind the head. A transaction you just broadcast is not immediately queryable — `GET /transfers/{txHash}` returns `400` until its block is indexed. That is expected, not a failure.
+  </Accordion>
+
+  <Accordion title="Rotating a webhook secret has no overlap window" icon="key">
+    The old secret dies the moment the new one is issued, and the new one is shown exactly once. Deliveries between rotation and deployment will fail your signature check and will not be retried. Have the new value ready to ship before you call rotate.
+  </Accordion>
+
+  <Accordion title="Missing resources return 400, not 404" icon="magnifying-glass">
+    Existence is validated per-field, so an unknown wallet reference or transaction hash comes back as a `400` validation error. Make sure your not-found handling keys off that.
+  </Accordion>
+
+  <Accordion title="Rate limits are per IP, not per key" icon="gauge-high">
+    60 requests per minute per address in production, shared by everything behind it. Give heavy background jobs their own pacing or their own egress. See [Rate limits](/guides/rate-limits).
+  </Accordion>
+</AccordionGroup>
+
+## Instrument before you launch
+
+Things worth a dashboard and an alert:
+
+- Transfers stuck in `unknown` for more than a few minutes.
+- Payouts blocked on insufficient gas, per wallet.
+- Webhook signature failures — a spike means either a rotation went wrong or someone is probing you.
+- Events seen by reconciliation that the webhook handler missed — your delivery loss rate.
+- `429` responses — you are at the ceiling.
+- `401` and `403` — a key expired, was revoked, or is calling from an unexpected address.
+
+## Final walkthrough
+
+<Steps>
+  <Step title="Provision on the production deployment">
+    Create a wallet, confirm `walletChain` ends in `_mainnet`.
+  </Step>
+  <Step title="Deposit a small amount">
+    Send a token transfer to the address. Confirm the webhook arrives, the signature verifies, and the transaction appears in `GET /transactions`.
+  </Step>
+  <Step title="Quote a payout that cannot succeed">
+    Ask for more than the balance. Confirm `isSufficient` is `false` and your UI shows the `reason` sensibly.
+  </Step>
+  <Step title="Send a small real payout">
+    With an idempotency key. Confirm the `txId` appears on a block explorer, then in the API once indexed.
+  </Step>
+  <Step title="Replay the same request">
+    Same key, same body. You must get the original response back and see exactly one transaction on-chain.
+  </Step>
+  <Step title="Break something on purpose">
+    Take your webhook handler down, generate an event, bring it back, and confirm reconciliation recovers it.
+  </Step>
+</Steps>
+
+If all six pass, you are ready.

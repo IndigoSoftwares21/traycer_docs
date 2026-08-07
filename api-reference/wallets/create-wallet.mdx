@@ -1,0 +1,64 @@
+---
+title: "Create wallet"
+description: "Provision a blockchain address under an identifier you choose."
+openapi: "POST /wallets"
+---
+
+<Note>
+  Requires a `read_write` scope key.
+</Note>
+
+Generates a fresh keypair on the requested network, encrypts the private key under your organization's key, and returns the receiving address. You never see the private key, and there is no way to export it.
+
+## walletReference rules
+
+<CardGroup cols={2}>
+  <Card title="Character set" icon="font">
+    `^[a-zA-Z0-9_-]+$` — letters, digits, underscores, hyphens. **No spaces.**
+  </Card>
+  <Card title="Length" icon="ruler">
+    1–255 characters.
+  </Card>
+  <Card title="Uniqueness" icon="fingerprint">
+    Unique within your organization. Another organization may use the same string.
+  </Card>
+  <Card title="Permanence" icon="lock">
+    Cannot be changed later. Use a stable internal ID, not an email address.
+  </Card>
+</CardGroup>
+
+<Tip>
+  A user who needs addresses on several chains needs several wallets, each with its own reference. `user_8842_tron` and `user_8842_eth` keeps them readable.
+</Tip>
+
+## After it returns
+
+<Warning>
+  The address is live immediately. Someone can deposit to it before you finish writing your own database row — the deposit will still be recorded correctly.
+</Warning>
+
+The response includes `coins`: the assets active on that network, inlined from [`GET /networks`](/api-reference/networks/list-networks) so you can render "this wallet accepts…" without a second call.
+
+Note the two chain fields. `network` is the family (`tron`); `walletChain` is the specific chain including environment (`tron_mainnet`, or `tron_nile` on testnet). Before going live, check a fresh wallet's `walletChain` actually ends in `_mainnet`.
+
+## Errors
+
+| Message | Cause |
+| --- | --- |
+| `A wallet with this reference already exists for this organization` | Reference already taken. Creation is not idempotent — this is the duplicate guard. |
+| `walletReference must only contain alphanumeric characters, underscores, or hyphens, with no spaces` | Illegal characters. Spaces are the usual culprit. |
+| `Network not found` | Unknown network name. |
+| `Network is currently inactive` | The network exists but is disabled. |
+
+All arrive as `400` with `validationErrors`.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Wallets" icon="wallet" href="/guides/wallets">
+    References, status, private keys, and the walletChain gotcha.
+  </Card>
+  <Card title="Get balances" icon="scale-balanced" href="/api-reference/wallets/get-balances">
+    Read what has arrived.
+  </Card>
+</CardGroup>

@@ -1,0 +1,63 @@
+---
+title: "Get balances"
+description: "Read a wallet's balances live from the blockchain."
+openapi: "GET /wallets/{walletReference}/balances"
+---
+
+<Note>
+  Requires a `read` scope key. Takes no parameters beyond the path.
+</Note>
+
+Queries the chain at request time. Nothing is cached, which means the number is always current — and the call is always slower than a database read, and fails with `500` when the upstream node is unreachable.
+
+## Balance keys vary by network
+
+The keys inside `balances` depend on the wallet's chain:
+
+| Network | Keys |
+| --- | --- |
+| `bitcoin` | `btc` |
+| `ethereum` | `eth`, `usdt`, `usdc` |
+| `bsc` | `bnb`, `usdt`, `usdc` |
+| `tron` | `trx`, `usdt`, `usdc` |
+
+Values are **whole units** — `430.25` means 430.25 USDT. Read by key and treat a missing key as zero:
+
+```javascript
+const NATIVE_BY_CHAIN_PREFIX = {
+    bitcoin: "btc",
+    ethereum: "eth",
+    bsc: "bnb",
+    tron: "trx",
+};
+
+const gasBalance = ({ walletChain, balances }) => {
+    const family = walletChain.split("_")[0];
+    return balances[NATIVE_BY_CHAIN_PREFIX[family]] ?? 0;
+};
+```
+
+<Warning>
+  A wallet holding tokens but no native currency **cannot send those tokens** — the fee is paid in the chain's native currency. Check the native key, not just the token key, before offering a withdrawal. See [Networks and assets](/guides/networks-and-assets).
+</Warning>
+
+## Use it sparingly
+
+This is the only endpoint that talks to a blockchain node on every request. That makes it both the slowest and the most likely to return `500` during upstream trouble.
+
+<Tip>
+  Do not call it per row in a list view, and do not poll it to detect deposits — [register a webhook](/guides/webhooks) instead. Reserve it for screens that must be exact, like a withdrawal form, and for the moment before a payout.
+</Tip>
+
+At 60 requests per minute, a loop over even a few hundred wallets exhausts the budget. See [Rate limits](/guides/rate-limits).
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Quote a transfer" icon="calculator" href="/api-reference/transfers/quote-transfer">
+    Returns balances *and* tells you whether they cover a specific transfer.
+  </Card>
+  <Card title="Webhooks" icon="bell" href="/guides/webhooks">
+    Get told about deposits instead of asking.
+  </Card>
+</CardGroup>

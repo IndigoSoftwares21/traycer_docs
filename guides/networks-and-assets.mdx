@@ -1,0 +1,213 @@
+---
+title: "Networks and assets"
+description: "Supported chains, the tokens on each, and why a wallet full of USDT still cannot send USDT."
+icon: "link"
+---
+
+Four networks are supported. Each has one native currency — the one that pays transaction fees — and, except for Bitcoin, a pair of stablecoins.
+
+| Network | Native currency | Tokens | Token standard |
+| --- | --- | --- | --- |
+| `bitcoin` | `BTC` | — | — |
+| `ethereum` | `ETH` | `USDT`, `USDC` | ERC20 |
+| `bsc` | `BNB` | `USDT`, `USDC` | BEP20 |
+| `tron` | `TRX` | `USDT`, `USDC` | TRC20 |
+
+Pass these names as `network` when creating a wallet or sending a transfer. The `asset` field takes the symbol: `BTC`, `ETH`, `BNB`, `TRX`, `USDT`, or `USDC`.
+
+<Tip>
+  Do not hardcode this table. [`GET /networks`](/api-reference/networks/list-networks) returns exactly what is active right now, including live contract addresses and decimals, and is the safe way to build a network picker.
+</Tip>
+
+## The gas rule
+
+<Warning>
+  **A token transfer is paid for in the chain's native currency.**
+
+  A wallet holding 500 USDT and 0 TRX cannot send USDT. The USDT balance is irrelevant to the fee — the network wants TRX, and there is none. The transfer is rejected before broadcasting.
+</Warning>
+
+This is the single most common integration surprise, and it catches people who have modelled the wallet as "a USDT balance" rather than "an address on a chain".
+
+What it means in practice:
+
+<Steps>
+  <Step title="Fund gas before you need it">
+    A wallet that will ever send tokens needs a native balance. Top it up when you provision it, or as part of your payout flow — not at the moment a user clicks withdraw.
+  </Step>
+  <Step title="Quote before every send">
+    [`POST /transfers/quote`](/api-reference/transfers/quote-transfer) returns `isSufficient` and, when it is `false`, a `reason` naming what is missing. It costs nothing and needs only a `read` key.
+  </Step>
+  <Step title="Handle the gas-shortfall case explicitly">
+    "Insufficient gas" is a different failure from "insufficient balance", and your users need different messaging for each. `reason` distinguishes them.
+  </Step>
+</Steps>
+
+```json A quote that will not go through
+{
+  "estimatedFee": 14.785,
+  "feeAsset": "TRX",
+  "isSufficient": false,
+  "reason": "Insufficient native TRX gas balance. Estimated network fee is 14.7850 TRX.",
+  "currentBalances": { "trx": 0, "usdt": 430.25, "usdc": 0 }
+}
+```
+
+### What fees actually cost
+
+Fees are estimated live per request, not fixed. Roughly what drives them on each chain:
+
+<AccordionGroup>
+  <Accordion title="Tron — energy, bandwidth, and account activation" icon="bolt">
+    A TRC20 transfer is simulated against the contract to measure energy consumption, priced at 420 sun per unit, plus around 0.345 TRX of bandwidth. A native TRX transfer is far cheaper — about 0.267 TRX.
+
+    On top of either, sending to an address that has never been seen on-chain adds **1 TRX** for account activation. First payouts to a fresh address therefore cost more than subsequent ones.
+  </Accordion>
+
+  <Accordion title="Ethereum and BSC — gas limit times gas price" icon="fire">
+    21,000 gas for a native transfer, 65,000 for a token transfer, multiplied by the current gas price fetched from the node. On Ethereum this swings enormously with congestion; on BSC it is comparatively stable and cheap.
+
+    If the fee lookup fails, the estimate falls back to 3 Gwei, which may under-quote a busy period.
+  </Accordion>
+
+  <Accordion title="Bitcoin — sat/vByte times transaction size" icon="bitcoin-sign">
+    The next-block fee rate is fetched live and applied to an assumed ~140 vByte native SegWit transaction. Falls back to 15 sat/vByte if the estimate is unavailable.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  `estimatedFee` is an estimate. The actual on-chain cost can differ, particularly on Ethereum where gas prices move between quoting and broadcasting. Leave headroom rather than funding a wallet with exactly the quoted amount.
+</Note>
+
+## Balance keys per network
+
+`balances` in [Get balances](/api-reference/wallets/get-balances), and `currentBalances` in a quote, are keyed by **lowercase** symbol — and which keys exist depends on the network:
+
+<CodeGroup>
+
+```json bitcoin
+{ "btc": 0.04213 }
+```
+
+```json ethereum
+{ "eth": 1.204, "usdt": 500, "usdc": 0 }
+```
+
+```json bsc
+{ "bnb": 0.85, "usdt": 500, "usdc": 0 }
+```
+
+```json tron
+{ "trx": 42.5, "usdt": 430.25, "usdc": 0 }
+```
+
+</CodeGroup>
+
+Read them by key rather than by position, and treat a missing key as zero. A single generic renderer works:
+
+```javascript
+const NATIVE_BY_NETWORK = {
+    bitcoin: "btc",
+    ethereum: "eth",
+    bsc: "bnb",
+    tron: "trx",
+};
+
+const nativeBalance = ({ network, balances }) =>
+    balances[NATIVE_BY_NETWORK[network]] ?? 0;
+
+const canPayGas = ({ network, balances, estimatedFee }) =>
+    nativeBalance({ network, balances }) >= estimatedFee;
+```
+
+## Discovering what is live
+
+[`GET /networks`](/api-reference/networks/list-networks) returns every active network with its active coins. Only active rows appear — a network or asset that has been disabled simply is not in the response, which is also why a transfer can fail with `Network is currently inactive`.
+
+```json 200
+{
+  "message": "Networks fetched successfully",
+  "code": 200,
+  "data": [
+    {
+      "networkId": "3f1c9a24-5c1e-4f0b-9c7a-2b1d8e5f4a30",
+      "networkName": "ethereum",
+      "networkIsActive": true,
+      "coins": [
+        {
+          "coinSymbol": "ETH",
+          "coinName": "Ethereum",
+          "coinContractAddress": null,
+          "coinDecimals": 18,
+          "coinIsNative": true,
+          "displayName": "ETH",
+          "tokenStandard": "Native"
+        },
+        {
+          "coinSymbol": "USDT",
+          "coinName": "Tether USD",
+          "coinContractAddress": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+          "coinDecimals": 6,
+          "coinIsNative": false,
+          "displayName": "USDT (ERC20)",
+          "tokenStandard": "ERC20"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Useful fields:
+
+- **`coinIsNative`** — `true` for the fee-paying currency. This is how you determine, generically, which asset a wallet needs for gas.
+- **`coinContractAddress`** — the live token contract for the environment you are pointed at. Testnet deployments return testnet contracts.
+- **`displayName`** / **`tokenStandard`** — pre-formatted labels like `USDT (TRC20)`, so you do not have to build the "which standard is this" mapping yourself.
+- **`coinDecimals`** — informational. The API takes and returns **whole units**: send `100` for 100 USDT, never `100000000`.
+
+## Addresses are validated per network
+
+`toAddress` is checked against the target network's address format before anything is broadcast. An Ethereum address in a Tron transfer is rejected:
+
+```json 400
+{
+  "message": "Validation failed",
+  "code": 400,
+  "validationErrors": [
+    {
+      "path": ["toAddress"],
+      "message": "Recipient address is not a valid address for this network"
+    }
+  ]
+}
+```
+
+This catches format errors — a mistyped or truncated address. It cannot catch a **well-formed address belonging to the wrong person**. There is no undo on a blockchain, so confirm destinations before sending.
+
+## Mainnet and testnet
+
+The chain a wallet lives on is recorded as `walletChain`, and it encodes the environment:
+
+| Network | Production | Non-production |
+| --- | --- | --- |
+| `tron` | `tron_mainnet` | `tron_nile` |
+| `ethereum` | `ethereum_mainnet` | `ethereum_sepolia` |
+| `bsc` | `bsc_mainnet` | `bsc_testnet` |
+| `bitcoin` | `bitcoin_mainnet` | `bitcoin_testnet` |
+
+The API decides which set to use from its own environment configuration — there is no per-request switch. A non-production deployment issues testnet addresses and testnet token contracts throughout.
+
+<Warning>
+  Testnet and mainnet wallets are not interchangeable, and testnet funds have no value. Before going live, confirm `walletChain` on a freshly created wallet actually says `_mainnet`. See [Going live](/guides/going-live).
+</Warning>
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Transfers" icon="paper-plane" href="/guides/transfers">
+    Quoting, sending, and tracking a payout end to end.
+  </Card>
+  <Card title="List networks" icon="code" href="/api-reference/networks/list-networks">
+    Try the endpoint in the playground.
+  </Card>
+</CardGroup>

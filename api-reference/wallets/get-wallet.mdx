@@ -1,0 +1,61 @@
+---
+title: "Get wallet"
+description: "Fetch one wallet by the reference you assigned it."
+openapi: "GET /wallets/{walletReference}"
+---
+
+<Note>
+  Requires a `read` scope key.
+</Note>
+
+Reads from the database only. For on-chain balances use [Get balances](/api-reference/wallets/get-balances), which is slower because it queries the chain.
+
+## Not found returns 400
+
+<Warning>
+  An unknown reference — or one belonging to another organization — returns `400`, not `404`:
+
+  ```json
+  {
+    "message": "Validation failed",
+    "code": 400,
+    "validationErrors": [
+      { "path": ["walletReference"], "message": "Wallet not found or not owned by organization" }
+    ]
+  }
+  ```
+
+  Existence is checked during request validation, so it surfaces as a field-level failure. See [Errors](/guides/errors).
+</Warning>
+
+The message deliberately does not distinguish "does not exist" from "belongs to someone else", so the endpoint cannot be used to probe whether a reference exists elsewhere.
+
+```javascript Treating 400 as not-found
+const findWallet = async (walletReference) => {
+    try {
+        return await traycer(`/wallets/${walletReference}`);
+    } catch (error) {
+        if (error.code === 400 && error.fieldErrors("walletReference").length) {
+            return null;
+        }
+        throw error;
+    }
+};
+```
+
+## Response notes
+
+- `coins` lists the assets active on this wallet's network, inlined from [`GET /networks`](/api-reference/networks/list-networks).
+- `network` is the family (`tron`); `walletChain` is the specific chain including environment (`tron_mainnet`).
+- `walletStatus` of `inactive` blocks outgoing transfers but **not** incoming deposits.
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Update status" icon="pen" href="/api-reference/wallets/update-wallet">
+    Freeze or re-enable outgoing transfers.
+  </Card>
+  <Card title="Wallet transactions" icon="list" href="/api-reference/wallets/list-wallet-transactions">
+    This wallet's deposit and withdrawal history.
+  </Card>
+</CardGroup>
