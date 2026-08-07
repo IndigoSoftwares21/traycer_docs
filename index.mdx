@@ -9,7 +9,7 @@ Traycer gives your application a wallet on Bitcoin, Ethereum, BSC, or Tron for e
 Everything is addressed by an identifier **you** choose — your user ID, order number, account reference. Traycer stores the mapping; you store nothing of ours.
 
 ```bash Create a wallet for user 8842
-curl -X POST https://your-domain.com/api/v1/http/wallets \
+curl -X POST https://traycercoinsbe-production.up.railway.app/api/v1/http/wallets \
   -H "x-api-key: $TRAYCER_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "walletReference": "user_8842", "network": "tron" }'
@@ -84,20 +84,12 @@ curl -X POST https://your-domain.com/api/v1/http/wallets \
 
 ## Base URL
 
-<CodeGroup>
-
-```bash Production
-https://your-domain.com/api/v1/http
+```bash
+https://traycercoinsbe-production.up.railway.app/api/v1/http
 ```
-
-```bash Local
-http://localhost:6969/api/v1/http
-```
-
-</CodeGroup>
 
 <Note>
-  `your-domain.com` is a placeholder — substitute the host you deployed the API to. The `v1` segment comes from the server's `API_VERSION` setting and defaults to `v1`.
+  Every path in these docs is relative to this base. The `v1` segment comes from the server's `API_VERSION` setting and defaults to `v1`.
 </Note>
 
 ## Every endpoint at a glance

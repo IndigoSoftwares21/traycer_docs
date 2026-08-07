@@ -2,7 +2,7 @@
 
 > Traycer provisions blockchain wallets on Bitcoin, Ethereum, BSC, and Tron for your users, reads live on-chain balances, prices and broadcasts transfers, and pushes webhook events when funds move. Every wallet is addressed by an identifier you choose (`walletReference`), so you never store Traycer identifiers.
 
-Base URL: `https://your-domain.com/api/v1/http` (placeholder — substitute your deployed host). Local default: `http://localhost:6969/api/v1/http`.
+Base URL: `https://traycercoinsbe-production.up.railway.app/api/v1/http`. All paths are relative to this base.
 
 Authentication: `x-api-key: trc_live_<prefix>_<secret>` on every request. Keys are scoped `read` or `read_write`.
 

@@ -30,9 +30,9 @@ info:
 
         ### Testing in the playground
 
-        Pick a server below, paste your API key into the **Authorization** panel, and send.
-        Requests go to the server you select — the production entry is a placeholder until you
-        substitute your deployed domain.
+        Paste your API key into the **Authorization** panel and send. Requests go to the live
+        production API, so anything you send here is real — create wallets and transfers with
+        care.
     contact:
         name: Traycer API Support
         url: https://github.com/IndigoSoftwares21
@@ -40,10 +40,8 @@ info:
         name: Proprietary
 
 servers:
-    - url: http://localhost:6969/api/v1/http
-      description: Local development server (default port 6969)
-    - url: https://your-domain.com/api/v1/http
-      description: Production — replace `your-domain.com` with your deployed host
+    - url: https://traycercoinsbe-production.up.railway.app/api/v1/http
+      description: Production
 
 security:
     - ApiKeyAuth: []
